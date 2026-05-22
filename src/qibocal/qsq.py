@@ -2,19 +2,11 @@ from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
-import plotly.graph_objects as go
-from qibo import gates
-from qibolab import AcquisitionType, AveragingMode, PulseSequence, Readout
-from scipy.optimize import curve_fit
+from qibo.models import Circuit
 
-from qibocal import update
 from qibocal.auto.operation import Data, Parameters, QubitId, Results, Routine
 from qibocal.calibration import CalibrationPlatform
-from qibo.models import Circuit
 from qibocal.calibration.calibration import QubitPairId
-from qibocal.config import log
-from qibocal.protocols.utils import COLORBAND, COLORBAND_LINE
-from qibolab import Delay
 
 
 # Protocol for verification

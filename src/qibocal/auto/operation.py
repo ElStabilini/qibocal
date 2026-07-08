@@ -6,7 +6,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from functools import wraps
 from pathlib import Path
-from typing import Generic, NewType, TypeVar, Union
+from typing import Generic, NewType, TypeVar
 
 import numpy as np
 import numpy.typing as npt
@@ -17,10 +17,10 @@ from qibocal.config import log
 from ..calibration.calibration import QubitId, QubitPairId
 from .serialize import deserialize, load, serialize
 
+__all__ = ["ProtocolsCollection", "Protocol"]
+
 OperationId = NewType("OperationId", str)
 """Identifier for a calibration routine."""
-ParameterValue = Union[float, int]
-"""Valid value for a routine and runcard parameter."""
 Qubits = dict[QubitId, Qubit]
 """Convenient way of passing qubit pairs in the routines."""
 
@@ -254,7 +254,7 @@ _ResultsT = TypeVar("_ResultsT", bound=Results)
 
 
 @dataclass
-class Routine(Generic[_ParametersT, _DataT, _ResultsT]):
+class Protocol(Generic[_ParametersT, _DataT, _ResultsT]):
     """A wrapped calibration routine."""
 
     acquisition: Callable[[_ParametersT], _DataT]
@@ -304,6 +304,14 @@ class Routine(Generic[_ParametersT, _DataT, _ResultsT]):
         return "targets" in inspect.signature(self.acquisition).parameters
 
 
+ProtocolsCollection = dict[str, Protocol]
+"""Collection of protocols.
+
+This collection is supposed to be a bundle, either built-in or provided by external
+extensions.
+"""
+
+
 @dataclass
 class DummyPars(Parameters):
     """Dummy parameters."""
@@ -333,5 +341,5 @@ def _dummy_update(
     """Dummy update function."""
 
 
-dummy_operation = Routine(_dummy_acquisition)
+dummy_operation = Protocol(_dummy_acquisition)
 """Example of a dummy operation."""

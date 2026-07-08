@@ -7,19 +7,17 @@ import numpy.typing as npt
 from qibolab import AcquisitionType, AveragingMode, Parameter, PulseSequence, Sweeper
 
 from qibocal import update
-from qibocal.auto.operation import Data, Parameters, QubitId, Results, Routine
+from qibocal.auto.operation import Data, Parameters, Protocol, QubitId, Results
 from qibocal.calibration import CalibrationPlatform
+from qibocal.protocols.utils import (
+    PowerLevel,
+    lorentzian_fit,
+    lorentzian_with_linear_background,
+    readout_frequency,
+)
 from qibocal.result import magnitude, phase
 from qibocal.update import replace
 
-from ..utils import (
-    PowerLevel,
-    chi2_reduced,
-    chi2_reduced_complex,
-    lorentzian,
-    lorentzian_fit,
-    readout_frequency,
-)
 from .resonator_utils import s21, s21_fit, s21_spectroscopy_plot, spectroscopy_plot
 
 __all__ = ["resonator_spectroscopy", "ResonatorSpectroscopyData", "ResSpecType"]
@@ -29,8 +27,6 @@ ResSpecType = np.dtype(
         ("freq", np.float64),
         ("signal", np.float64),
         ("phase", np.float64),
-        ("error_signal", np.float64),
-        ("error_phase", np.float64),
     ]
 )
 """Custom dtype for resonator spectroscopy."""
@@ -41,34 +37,26 @@ class ResonatorSpectroscopyFit:
     """ResonatorSpectroscopy fit."""
 
     function: Callable
-    """Routine function to fit data with a model."""
+    """Protocol function to fit data with a model."""
     fit: Callable
     """Fit function used for the resonance."""
-    chi2: Callable
-    """Chi2 reduced."""
     values: Callable
     """Extract values from data."""
-    errors: Callable
-    """Extract errors from data."""
     plot: Callable
     """Plotting function for ResonatorSpectroscopy."""
 
 
 FITS = {
     "lorentzian": ResonatorSpectroscopyFit(
-        lorentzian,
+        lorentzian_with_linear_background,
         lorentzian_fit,
-        chi2_reduced,
         lambda z: z.signal,
-        lambda z: z.error_signal,
         spectroscopy_plot,
     ),
     "s21": ResonatorSpectroscopyFit(
         s21,
         s21_fit,
-        chi2_reduced_complex,
         lambda z: (z.signal, z.phase),
-        lambda z: (z.error_signal, z.error_phase),
         s21_spectroscopy_plot,
     ),
 }
@@ -87,7 +75,7 @@ class ResonatorSpectroscopyParameters(Parameters):
     """Power regime (low or high). If low the readout frequency will be updated.
     If high both the readout frequency and the bare resonator frequency will be updated."""
     fit_function: str = "lorentzian"
-    """Routine function (lorentzian or s21) to fit data with a model."""
+    """Protocol function (lorentzian or s21) to fit data with a model."""
     phase_sign: bool = True
     """Several instruments have their convention about the sign of the phase. If True, the routine
     will apply a minus to the phase data."""
@@ -112,12 +100,6 @@ class ResonatorSpectroscopyResults(Results):
         default_factory=dict,
     )
     """Bare resonator frequency [Hz] for each qubit."""
-    error_fit_pars: dict[QubitId, list] = field(default_factory=dict)
-    """Errors of the fit parameters."""
-    chi2_reduced: dict[QubitId, tuple[float, float | None]] = field(
-        default_factory=dict
-    )
-    """Chi2 reduced."""
     amplitude: dict[QubitId, float] | None = field(
         default_factory=dict,
     )
@@ -207,7 +189,7 @@ def _acquisition(
         nshots=params.nshots,
         relaxation_time=params.relaxation_time,
         acquisition_type=AcquisitionType.INTEGRATION,
-        averaging_mode=AveragingMode.SINGLESHOT,
+        averaging_mode=AveragingMode.CYCLIC,
     )
 
     # retrieve the results for every qubit
@@ -221,11 +203,9 @@ def _acquisition(
             ResSpecType,
             (q),
             dict(
-                signal=signal.mean(axis=0),
-                phase=phase_.mean(axis=0),
+                signal=signal,
+                phase=phase_,
                 freq=delta_frequency_range + ro_frequency,
-                error_signal=np.std(signal, axis=0, ddof=1) / np.sqrt(signal.shape[0]),
-                error_phase=np.std(phase_, axis=0, ddof=1) / np.sqrt(phase_.shape[0]),
             ),
         )
     return data
@@ -240,8 +220,6 @@ def _fit(
     bare_frequency = {}
     frequency = {}
     fitted_parameters = {}
-    error_fit_pars = {}
-    chi2 = {}
 
     fit = FITS[data.fit_function]
 
@@ -257,32 +235,14 @@ def _fit(
             qubit_data, resonator_type=data.resonator_type, fit="resonator"
         )
         if fit_result is not None:
-            (
-                frequency[qubit],
-                fitted_parameters[qubit],
-                error_fit_pars[qubit],
-            ) = fit_result
-
-            dof = len(data[qubit].freq) - len(fitted_parameters[qubit])
-
-            if data.power_level is PowerLevel.high:
+            frequency[qubit], fitted_parameters[qubit], _ = fit_result
+            if data.power_level == PowerLevel.high:
                 bare_frequency[qubit] = frequency[qubit]
 
-            chi2[qubit] = (
-                fit.chi2(
-                    fit.values(data[qubit]),
-                    fit.function(data[qubit].freq, *fitted_parameters[qubit]),
-                    fit.errors(data[qubit]),
-                    dof,
-                ),
-                np.sqrt(2 / dof),
-            )
     return ResonatorSpectroscopyResults(
         frequency=frequency,
         fitted_parameters=fitted_parameters,
-        bare_frequency=bare_frequency if data.power_level is PowerLevel.high else {},
-        error_fit_pars=error_fit_pars,
-        chi2_reduced=chi2,
+        bare_frequency=bare_frequency if data.power_level == PowerLevel.high else {},
         amplitude=data.amplitudes,
     )
 
@@ -313,5 +273,5 @@ def _update(
         ].resonator.bare_frequency_amplitude = results.amplitude[target]
 
 
-resonator_spectroscopy = Routine(_acquisition, _fit, _plot, _update)
-"""ResonatorSpectroscopy Routine object."""
+resonator_spectroscopy = Protocol(_acquisition, _fit, _plot, _update)
+"""ResonatorSpectroscopy Protocol object."""

@@ -7,7 +7,7 @@ from qibolab import AcquisitionType, AveragingMode, PulseSequence, Readout
 from scipy.optimize import curve_fit
 
 from qibocal import update
-from qibocal.auto.operation import Data, Parameters, QubitId, Results, Routine
+from qibocal.auto.operation import Data, Parameters, Protocol, QubitId, Results
 from qibocal.calibration import CalibrationPlatform
 from qibocal.config import log
 from qibocal.protocols.utils import (
@@ -31,27 +31,18 @@ def flipping_sequence(
 ):
     """Pulse sequence for flipping experiment."""
 
-    sequence = PulseSequence()
     natives = platform.natives.single_qubit[qubit]
+    sequence = natives.R(theta=np.pi / 2)
 
-    sequence |= natives.R(theta=np.pi / 2)
+    if rx90:
+        qd_channel, qd_pulse = natives.RX90()[0]
+    else:
+        qd_channel, qd_pulse = natives.RX()[0]
 
-    for _ in range(flips):
-        if rx90:
-            qd_channel, qd_pulse = natives.RX90()[0]
-        else:
-            qd_channel, qd_pulse = natives.RX()[0]
-
-        qd_detuned = update.replace(
-            qd_pulse, amplitude=qd_pulse.amplitude + delta_amplitude
-        )
-        sequence.append((qd_channel, qd_detuned))
-        sequence.append((qd_channel, qd_detuned))
-
-        if rx90:
-            sequence.append((qd_channel, qd_detuned))
-            sequence.append((qd_channel, qd_detuned))
-
+    qd_detuned = update.replace(
+        qd_pulse, amplitude=qd_pulse.amplitude + delta_amplitude
+    )
+    sequence.extend([(qd_channel, qd_detuned)] * (flips * (4 if rx90 else 2)))
     sequence |= natives.MZ()
 
     return sequence
@@ -380,5 +371,5 @@ def _update(results: FlippingResults, platform: CalibrationPlatform, qubit: Qubi
     update.drive_amplitude(results.amplitude[qubit], results.rx90, platform, qubit)
 
 
-flipping = Routine(_acquisition, _fit, _plot, _update)
-"""Flipping Routine  object."""
+flipping = Protocol(_acquisition, _fit, _plot, _update)
+"""Flipping Protocol  object."""

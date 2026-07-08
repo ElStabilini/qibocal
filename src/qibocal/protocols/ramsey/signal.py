@@ -4,7 +4,7 @@ import numpy as np
 import numpy.typing as npt
 import plotly.graph_objects as go
 
-from qibocal.auto.operation import QubitId, Routine
+from qibocal.auto.operation import Protocol, QubitId
 from qibocal.calibration import CalibrationPlatform
 from qibocal.config import log
 from qibocal.result import collect, magnitude, unpack
@@ -14,7 +14,7 @@ from .acquisition import (
     RamseyParameters,
     RamseyResults,
     execute_experiment,
-    ramsey_sequence,
+    ramsey_and_acquisition_sequence,
 )
 from .processing import (
     fitting,
@@ -64,7 +64,7 @@ def _acquisition(
         },
     )
 
-    sequence, delays = ramsey_sequence(platform, targets)
+    sequence, delays = ramsey_and_acquisition_sequence(platform, targets)
 
     results = execute_experiment(
         sequence=sequence,
@@ -143,8 +143,8 @@ def _plot(
     )
 
 
-ramsey_signal = Routine(_acquisition, _fit, _plot, ramsey_update)
-"""Ramsey Routine object.
+ramsey_signal = Protocol(_acquisition, _fit, _plot, ramsey_update)
+"""Ramsey Protocol object.
 
 The protocol consists in applying the following pulse sequence:
 RX90 - wait - RX90 - MZ

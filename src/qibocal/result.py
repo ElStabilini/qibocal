@@ -43,8 +43,7 @@ def magnitude(iq: IQ):
 
     It is supposed to be a tension, possibly in arbitrary units.
     """
-    iq_ = _lift(iq)
-    return np.sqrt(iq_[0] ** 2 + iq_[1] ** 2)
+    return np.linalg.norm(iq, axis=-1)
 
 
 def average(values: npt.NDArray) -> tuple[npt.NDArray, npt.NDArray]:
@@ -74,10 +73,9 @@ def phase(iq: npt.NDArray):
     It is assumed that the I and Q component are discriminated by the
     innermost dimension of the array.
     """
-    iq_ = _lift(iq)
-    return np.unwrap(np.arctan2(iq_[0], iq_[1]))
+    return np.unwrap(np.arctan2(iq[..., 0], iq[..., 1]))
 
 
-def probability(values: npt.NDArray, state: int = 0):
+def probability(values: npt.NDArray, state: int = 0) -> npt.NDArray:
     """Return the statistical frequency of the specified state."""
-    return np.sum(values == state, axis=0) / len(values)
+    return np.mean(values == state, axis=0)

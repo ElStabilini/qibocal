@@ -10,21 +10,21 @@ from qibolab import (
     Sweeper,
 )
 
-from qibocal.auto.operation import QubitId, Routine
+from qibocal.auto.operation import Protocol, QubitId
 from qibocal.calibration import CalibrationPlatform
 from qibocal.update import replace
 
 from ... import update
 from ...result import magnitude, phase
-from ..resonator_spectroscopies.resonator_spectroscopy import ResSpecType
-from ..resonator_spectroscopies.resonator_utils import spectroscopy_plot
 from ..utils import readout_frequency, table_dict, table_html
 from .qubit_spectroscopy import (
     QubitSpectroscopyData,
     QubitSpectroscopyParameters,
     QubitSpectroscopyResults,
+    QubitSpecType,
     _fit,
 )
+from .qubit_spectroscopy import _plot as qubit_spectroscopy_plot
 
 __all__ = ["qubit_spectroscopy_ef"]
 
@@ -121,7 +121,6 @@ def _acquisition(
         )
 
     data = QubitSpectroscopyEFData(
-        resonator_type=platform.resonator_type,
         amplitudes=amplitudes,
         drive_frequencies=drive_frequencies,
     )
@@ -151,23 +150,14 @@ def _acquisition(
 
         signal = magnitude(result)
         _phase = phase(result)
-        if len(signal.shape) > 1:
-            error_signal = np.std(signal, axis=0, ddof=1) / np.sqrt(signal.shape[0])
-            signal = np.mean(signal, axis=0)
-            error_phase = np.std(_phase, axis=0, ddof=1) / np.sqrt(_phase.shape[0])
-            _phase = np.mean(_phase, axis=0)
-        else:
-            error_signal, error_phase = None, None
 
         data.register_qubit(
-            ResSpecType,
+            QubitSpecType,
             (qubit),
             dict(
                 signal=signal,
                 phase=_phase,
                 freq=delta_frequency_range + f0,
-                error_signal=error_signal,
-                error_phase=error_phase,
             ),
         )
     return data
@@ -177,45 +167,24 @@ def _plot(
     data: QubitSpectroscopyEFData, target: QubitId, fit: QubitSpectroscopyEFResults
 ):
     """Plotting function for QubitSpectroscopy."""
-    figures, report = spectroscopy_plot(data, target, fit)
-    show_error_bars = not np.isnan(data[target].error_signal).any()
+    figures, report = qubit_spectroscopy_plot(data, target, fit)
     if fit is not None:
-        if show_error_bars:
-            report = table_html(
-                table_dict(
-                    target,
-                    [
-                        "Frequency 1->2 [Hz]",
-                        "Amplitude [a.u.]",
-                        "Anharmonicity [Hz]",
-                        "Chi2",
-                    ],
-                    [
-                        (fit.frequency[target], fit.error_fit_pars[target][1]),
-                        (fit.amplitude[target], fit.error_fit_pars[target][0]),
-                        (fit.anharmonicity[target], fit.error_fit_pars[target][2]),
-                        fit.chi2_reduced[target],
-                    ],
-                    display_error=True,
-                )
+        report = table_html(
+            table_dict(
+                target,
+                [
+                    "Frequency 1->2 [Hz]",
+                    "Amplitude [a.u.]",
+                    "Anharmonicity [Hz]",
+                ],
+                [
+                    fit.frequency[target],
+                    fit.amplitude[target],
+                    fit.anharmonicity[target],
+                ],
+                display_error=False,
             )
-        else:
-            report = table_html(
-                table_dict(
-                    target,
-                    [
-                        "Frequency 1->2 [Hz]",
-                        "Amplitude [a.u.]",
-                        "Anharmonicity [Hz]",
-                    ],
-                    [
-                        fit.frequency[target],
-                        fit.amplitude[target],
-                        fit.anharmonicity[target],
-                    ],
-                    display_error=False,
-                )
-            )
+        )
 
     return figures, report
 
@@ -230,5 +199,5 @@ def _update(
     ]
 
 
-qubit_spectroscopy_ef = Routine(_acquisition, fit_ef, _plot, _update)
-"""QubitSpectroscopyEF Routine object."""
+qubit_spectroscopy_ef = Protocol(_acquisition, fit_ef, _plot, _update)
+"""QubitSpectroscopyEF Protocol object."""

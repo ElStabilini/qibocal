@@ -31,7 +31,7 @@ def test_serialization_single_qubits(tmp_path):
         cal.single_qubits[i].resonator.dressed_frequency = 7.001e9
         assert cal.single_qubits[i].resonator.dispersive_shift == -0.001e9
         cal.single_qubits[i].qubit.frequency_01 = 5e9
-        assert cal.single_qubits[i].qubit.anharmonicity == 0
+        assert cal.single_qubits[i].qubit.anharmonicity == 0.0
         cal.single_qubits[i].qubit.frequency_12 = 4.8e9
         cal.single_qubits[i].qubit.maximum_frequency = cal.single_qubits[
             0
@@ -66,7 +66,9 @@ def test_serialization_qubit_pairs(tmp_path):
     """Testing serialization for qubit pairs."""
 
     cal = Calibration()
-    cal.two_qubits[0, 1] = TwoQubitCalibration(rb_fidelity=[0.99, 0.1], coupling=0.5)
+    cal.two_qubits[0, 1] = TwoQubitCalibration(
+        rb_fidelity=[0.99, 0.1], coupling=[0.5, 0.01]
+    )
     cal.dump(tmp_path)
     new_cal = cal.model_validate_json((tmp_path / CALIBRATION).read_text())
     assert new_cal == cal

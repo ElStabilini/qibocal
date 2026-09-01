@@ -222,7 +222,7 @@ def _plot(data: ResonatorPunchoutData, fit: ResonatorPunchoutResults, target: Qu
             x=x,
             y=y,
             z=qubit_phase,
-            colorbar_x=0.46,
+            colorbar_x=1.01,
             colorscale="Viridis",
         ),
         row=1,

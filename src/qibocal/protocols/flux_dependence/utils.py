@@ -10,11 +10,14 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from scipy import ndimage
 from scipy.optimize import OptimizeWarning, curve_fit
+from scipy.signal import medfilt
 
-from ...auto.operation import Parameters
+from ...auto.operation import Parameters, QubitId
+from ...config import log
 from ..utils import (
     DISTANCE_XY,
     DISTANCE_Z,
+    GHZ_TO_HZ,
     HZ_TO_GHZ,
     FeatExtractionError,
     Range,
@@ -677,3 +680,211 @@ def ransac_fit(
     inliers_mask = best_inliers
 
     return popt, inliers_mask
+
+
+# Alternative fit flux extraction
+
+
+# restored the function from qibocal/protocols/utils.py - v0.2.4
+def scaling_slice(sig: np.ndarray, axis: int | None) -> np.ndarray:
+    """Min-max scaling over a specific axis of the np.ndarray."""
+
+    def expand(a):
+        return np.expand_dims(a, axis) if axis is not None else a
+
+    sig_min = expand(np.min(sig, axis=axis))
+    return (sig - sig_min) / (expand(np.max(sig, axis=axis)) - sig_min)
+
+
+def extract_trace(
+    freq: npt.NDArray[np.float64],
+    bias: npt.NDArray[np.float64],
+    signal: npt.NDArray[np.float64],
+    find_min: bool,
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], npt.NDArray[np.bool_]]:
+    """Extract one candidate (frequency, bias) peak per bias row."""
+    freqs = np.unique(freq)
+    biases = np.unique(bias)
+    grid = signal.reshape(len(biases), len(freqs))
+
+    z = -grid if find_min else grid
+    z = scaling_slice(filter_data(z), axis=1)
+
+    peaks = peaks_finder(freqs, biases, z)
+    peak_freqs = peaks["x"]["val"]
+    peak_biases = peaks["y"]["val"]
+    if len(peak_freqs) < 5:
+        return peak_freqs, peak_biases, np.ones(len(peak_freqs), dtype=bool)
+
+    smoothed = medfilt(peak_freqs, kernel_size=5)
+    deviation = np.abs(peak_freqs - smoothed)
+    # empirically found that 4x median deviation is a good threshold
+    tolerance = max(4 * np.median(deviation), 3 * float(np.mean(np.diff(freqs))))
+    keep = deviation < tolerance
+    return peak_freqs, peak_biases, keep
+
+
+def _resonator_arc_model(w_max: float):
+    """Build the resonator-frequency model for a fixed maximum qubit frequency."""
+
+    def model(x, g, d, offset, normalization, resonator_freq, charging_energy):
+        return transmon_readout_frequency(
+            xi=x,
+            xj=0,
+            w_max=w_max,
+            d=d,
+            normalization=normalization,
+            offset=offset,
+            crosstalk_element=1,
+            charging_energy=charging_energy,
+            resonator_freq=resonator_freq,
+            g=g,
+        )
+
+    return model
+
+
+def initial_guess(model, biases, frequencies_ghz, f_bare, charging_energy, d=0.0):
+
+    # TODO: this is an arbitrary value based on the period of the we expect to see for our resonators.
+    # May be useful a function to estimate the period of the resonator and then set the grid accordingly.
+    # The offset grid is in units of Phi0; one full period is enough by symmetry
+
+    offset_grid = np.linspace(-0.5, 0.5, 81)
+
+    # TODO: values for the normalization grid are based on the expected period of the resonator.
+    normalization_grid = np.linspace(0.2, 12.0, 60)
+
+    """Brute-force scan over the two periodic parameters."""
+    best_chi2, best = np.inf, None
+    for normalization in normalization_grid:
+        for offset in offset_grid:
+            shape = (
+                # the 0.1 value for g is arbitrary and currently empirically tested
+                model(biases, 0.1, d, offset, normalization, f_bare, charging_energy)
+                - f_bare
+            )
+            if not np.all(np.isfinite(shape)):
+                continue
+            design = np.column_stack([np.ones_like(shape), shape])
+            coeffs, *_ = np.linalg.lstsq(design, frequencies_ghz, rcond=None)
+            if coeffs[1] <= 0:  # g^2 must be positive
+                continue
+            chi2 = float(np.sum((design @ coeffs - frequencies_ghz) ** 2))
+            if chi2 < best_chi2:
+                best_chi2, best = (
+                    chi2,
+                    {
+                        "g": 0.1 * np.sqrt(coeffs[1]),
+                        "d": d,
+                        "offset": offset,
+                        "normalization": normalization,
+                        "resonator_freq": coeffs[0],
+                        "charging_energy": charging_energy,
+                    },
+                )
+    return best
+
+
+def fit_qubit(
+    qubit: QubitId,
+    w_max: float,
+    bare_resonator_frequency: float,
+    charging_energy: float,
+    frequencies: npt.NDArray[np.float64],
+    biases: npt.NDArray[np.float64],
+) -> tuple[dict[str, float], float]:
+    """Fit a resonator-vs-flux arc."""
+
+    # used 12 points as a minimum because the model has 6 parameters and we want at least 2x overdetermined
+    if len(biases) < 12:
+        raise RuntimeError(
+            f"only {len(biases)} usable points extracted "
+            f"(need >= 12); check the SNR and the frequency window"
+        )
+    frequencies_ghz = frequencies * HZ_TO_GHZ
+    w_max_ghz = w_max * HZ_TO_GHZ
+    if not np.isfinite(w_max_ghz) or w_max_ghz <= 0:
+        raise RuntimeError("qubit frequency is missing from the platform config")
+
+    charging_energy_ghz = charging_energy * HZ_TO_GHZ
+    if not 0.05 < charging_energy_ghz < 0.5:
+        log.warning(
+            f"[resonator_flux] qubit {qubit}: charging energy is "
+            f"{charging_energy_ghz} GHz, falling back to "
+            f"0.2 GHz"
+        )
+        charging_energy_ghz = 0.2
+
+    f_bare_ghz = bare_resonator_frequency * HZ_TO_GHZ
+    if abs(f_bare_ghz - np.mean(frequencies_ghz)) > 0.5:
+        log.warning(
+            f"[resonator_flux] qubit {qubit}: bare resonator frequency "
+            f"({f_bare_ghz} GHz) is inconsistent with the data; using the "
+            "measured mean instead"
+        )
+        f_bare_ghz = float(np.mean(frequencies_ghz))
+
+    model = _resonator_arc_model(w_max_ghz)
+    guess = initial_guess(
+        model, biases, frequencies_ghz, f_bare_ghz, charging_energy_ghz
+    )
+    if guess is None:
+        raise RuntimeError(
+            "no feasible initial guess on the (offset, normalization) grid"
+        )
+
+    bounds = {
+        "g": (5e-3, 0.4),  # GHz
+        "d": (0.0, 0.9),
+        "offset": (-1.0, 1.0),
+        "normalization": (0.05, 50.0),  # V^-1
+        "charging_energy": (0.10, 0.35),  # GHz
+    }
+    bounds["resonator_freq"] = (
+        guess["resonator_freq"] - 0.1,
+        guess["resonator_freq"] + 0.1,
+    )
+    arc_paramers_names = [
+        "g",
+        "d",
+        "offset",
+        "normalization",
+        "resonator_freq",
+        "charging_energy",
+    ]
+    fixed_params = ["d", "charging_energy"]
+    free_params = [name for name in arc_paramers_names if name not in fixed_params]
+
+    def wrapped(x, *values):
+        params = dict(guess)
+        params.update(zip(free_params, values))
+        return model(x, *[params[name] for name in arc_paramers_names])
+
+    p0 = [float(np.clip(guess[n], *bounds[n])) for n in free_params]
+    popt, _ = curve_fit(
+        wrapped,
+        biases,
+        frequencies_ghz,
+        p0=p0,
+        bounds=(
+            [bounds[n][0] for n in free_params],
+            [bounds[n][1] for n in free_params],
+        ),
+        x_scale="jac",  # parameters span ~5 MHz to several GHz
+        loss="soft_l1",  # tolerate the few outliers left in the trace
+        f_scale=5e-5,  # 50 kHz, ~ one frequency step
+        maxfev=100000,
+    )
+
+    params = dict(guess)
+    params.update(zip(free_params, popt))
+    rms = (
+        float(np.sqrt(np.mean((wrapped(biases, *popt) - frequencies_ghz) ** 2)))
+        * GHZ_TO_HZ
+    )
+
+    for key in ("g", "resonator_freq", "charging_energy"):
+        params[key] *= GHZ_TO_HZ
+
+    return params, rms

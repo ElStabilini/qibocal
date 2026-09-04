@@ -1,7 +1,8 @@
 import inspect
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from inspect import Parameter, Signature
 from typing import Any
 
 import numpy as np
@@ -544,6 +545,10 @@ def ransac_fit(
     stop_probability: float = 0.999,
     random_state: int = 0,
     bounds: tuple[npt.ArrayLike, npt.ArrayLike] | None = None,
+    p0_sampler: Callable[[np.random.RandomState], np.ndarray] | None = None,
+    function_dof: int | None = None,
+    loss: str = "linear",
+    f_scale: float = 1.0,
 ) -> tuple[npt.NDArray[np.floating], npt.NDArray[np.bool_]]:
     """Fit a model to data using RANSAC, ignoring outliers.
 
@@ -572,6 +577,10 @@ def ransac_fit(
     # poorly/non constrained parameters.
     method = "lm" if bounds is None else "trf"
     fit_kwargs: dict[str, Any] = {} if bounds is None else {"bounds": bounds}
+
+    if bounds is not None:
+        # x_scale="jac" is essential: the parameters span ~1e-2 to ~1e1 in GHz units
+        fit_kwargs.update(bounds=bounds, x_scale="jac")
 
     function_dof = _function_dof(fit_function)
     if len(xvals) < function_dof:
@@ -611,6 +620,7 @@ def ransac_fit(
             continue
         tried_subsets.add(subset_)
 
+        start = p0_sampler(rng) if p0_sampler is not None else None
         try:
             with warnings.catch_warnings():
                 # Poor fits are expected for random subsets, so suppress these warnings.
@@ -619,6 +629,7 @@ def ransac_fit(
                     fit_function,
                     xvals[subset],
                     yvals[subset],
+                    p0=start,
                     method=method,
                     **fit_kwargs,
                 )
@@ -670,6 +681,8 @@ def ransac_fit(
         p0=best_params,
         method=method,
         maxfev=100000,
+        loss=loss,
+        f_scale=f_scale,
         **fit_kwargs,
     )
 
@@ -677,3 +690,389 @@ def ransac_fit(
     inliers_mask = best_inliers
 
     return popt, inliers_mask
+
+
+CHARGING_ENERGY_RANGE_GHZ = (0.05, 0.5)
+"""Plausible Ec / h for a transmon. Outside this the dispersive model is meaningless."""
+
+DEFAULT_CHARGING_ENERGY_GHZ = 0.2
+"""Fallback Ec / h used only when the platform value is absent or out of range."""
+
+ASYMMETRY_RANGE = (0.0, 0.9)
+"""Junction asymmetry d = (Ej1 - Ej2) / (Ej1 + Ej2); d -> 1 is a degenerate SQUID."""
+
+OFFSET_PERIOD = 1.0
+"""The model depends on ``offset`` only modulo 1 (cos^2 has period pi in pi*(...))."""
+
+
+@dataclass(frozen=True)
+class SweepScales:
+    """Characteristic scales of a (frequency, bias) sweep, measured from the data."""
+
+    freq_step: float
+    freq_span: float
+    freq_center: float
+    bias_step: float
+    bias_span: float
+    bias_window: tuple[float, float]
+
+    @classmethod
+    def from_data(
+        cls,
+        freq: npt.NDArray[np.floating],
+        bias: npt.NDArray[np.floating],
+    ) -> "SweepScales":
+        """Measure the scales of the raw sweep. Pass ``freq`` already in the fit units."""
+        freqs = np.unique(freq)
+        biases = np.unique(bias)
+        if len(freqs) < 2 or len(biases) < 2:
+            raise RuntimeError(
+                "cannot estimate sweep scales: need at least two distinct "
+                f"frequencies (got {len(freqs)}) and biases (got {len(biases)})"
+            )
+        return cls(
+            # median, not mean: robust to a non-uniform or gapped sweep
+            freq_step=float(np.median(np.diff(freqs))),
+            freq_span=float(freqs[-1] - freqs[0]),
+            freq_center=float(np.mean(freqs)),
+            bias_step=float(np.median(np.diff(biases))),
+            bias_span=float(biases[-1] - biases[0]),
+            bias_window=(float(biases[0]), float(biases[-1])),
+        )
+
+
+MIN_POINTS_PER_PERIOD = 4
+# Nyquist-with-margin: a flux period sampled by fewer points cannot be identified.
+
+MAX_PERIODS_IN_SPAN = 2.0
+# Longest period worth trying, as a multiple of the bias span. Beyond ~2 spans the arc
+# is indistinguishable from a monotonic drift and the fit is unconstrained anyway.
+
+
+def normalization_range(scales: SweepScales) -> tuple[float, float]:
+    """Range of ``normalization`` (= 1 / flux period, in bias units) the sweep can see."""
+    period_min = MIN_POINTS_PER_PERIOD * scales.bias_step
+    period_max = MAX_PERIODS_IN_SPAN * scales.bias_span
+    return 1.0 / period_max, 1.0 / period_min
+
+
+def normalization_grid(
+    scales: SweepScales, points: int = 60
+) -> npt.NDArray[np.float64]:
+    """Log-spaced grid: ``normalization`` is a scale parameter, so geometric spacing
+    gives uniform *relative* resolution over the (often 1-2 decade) range."""
+    low, high = normalization_range(scales)
+    return np.geomspace(low, high, points)
+
+
+OFFSET_OVERSAMPLING = 2.0
+"""How finely to resolve the offset, in fractions of one bias step."""
+
+
+def offset_grid(
+    normalization: float, scales: SweepScales, max_points: int = 512
+) -> npt.NDArray[np.float64]:
+    """Offset grid matched to the current ``normalization``."""
+
+    # Shifting ``offset`` by delta translates the pattern by ``delta / normalization`` in
+    # bias, so the offset resolution needed to move the curve by half a bias step depends
+    # on the normalization. Making the grid adaptive is both more correct and cheaper than
+    # a fixed 81-point grid: coarse where the period is short, fine where it is long.
+    # One period of offset is enough by symmetry.
+    resolution = normalization * scales.bias_step / OFFSET_OVERSAMPLING
+    points = int(np.clip(np.ceil(OFFSET_PERIOD / resolution), 9, max_points))
+    return np.linspace(-OFFSET_PERIOD / 2, OFFSET_PERIOD / 2, points)
+
+
+ARC_PARAMETERS = (
+    "g",
+    "d",
+    "offset",
+    "normalization",
+    "resonator_freq",
+    "charging_energy",
+)
+
+G_PROBE_GHZ = 0.1
+"""Arbitrary probe coupling. It cancels: the shape is linear in g^2, so the linear
+solve rescales it and ``g = G_PROBE * sqrt(coeff)`` recovers the actual value."""
+
+
+def grid_initial_guess(
+    model: Callable[..., np.ndarray],
+    biases: npt.NDArray[np.floating],
+    frequencies_ghz: npt.NDArray[np.floating],
+    f_bare_ghz: float,
+    charging_energy_ghz: float,
+    scales: SweepScales,
+    d: float = 0.0,
+    n_candidates: int = 8,
+) -> list[dict[str, float]]:
+    """Scan (offset, normalization) and solve the remaining parameters linearly."""
+    y = np.asarray(frequencies_ghz, dtype=float)
+    x = np.asarray(biases, dtype=float)
+    y_mean = y.mean()
+
+    candidates: list[tuple[float, dict[str, float]]] = []
+    for normalization in normalization_grid(scales):
+        offsets = offset_grid(normalization, scales)
+        # shape has dimensions (n_offsets, n_biases)
+        shape = (
+            model(
+                x[None, :],
+                G_PROBE_GHZ,
+                d,
+                offsets[:, None],
+                normalization,
+                f_bare_ghz,
+                charging_energy_ghz,
+            )
+            - f_bare_ghz
+        )
+
+        centered = shape - shape.mean(axis=1, keepdims=True)
+        variance = np.einsum("ij,ij->i", centered, centered)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            slope = np.einsum("ij,j->i", centered, y - y_mean) / variance
+            intercept = y_mean - slope * shape.mean(axis=1)
+            residuals = intercept[:, None] + slope[:, None] * shape - y
+            chi2 = np.einsum("ij,ij->i", residuals, residuals)
+
+        # g^2 must be positive, and skip grid points where the model blows up (the
+        # dispersive denominator vanishes when the arc crosses the resonator)
+        invalid = (
+            ~np.all(np.isfinite(shape), axis=1)
+            | ~np.isfinite(chi2)
+            | (slope <= 0)
+            | (variance <= 0)
+        )
+        chi2 = np.where(invalid, np.inf, chi2)
+
+        for index in np.argsort(chi2)[:n_candidates]:
+            if not np.isfinite(chi2[index]):
+                break
+            candidates.append(
+                (
+                    float(chi2[index]),
+                    {
+                        "g": float(G_PROBE_GHZ * np.sqrt(slope[index])),
+                        "d": float(d),
+                        "offset": float(offsets[index]),
+                        "normalization": float(normalization),
+                        "resonator_freq": float(intercept[index]),
+                        "charging_energy": float(charging_energy_ghz),
+                    },
+                )
+            )
+
+    if not candidates:
+        raise RuntimeError(
+            "no feasible initial guess on the (offset, normalization) grid; "
+            "check the bias range and the bare resonator frequency"
+        )
+
+    candidates.sort(key=lambda item: item[0])
+    return [params for _, params in candidates[:n_candidates]]
+
+
+G_BOUND_FACTOR = 10.0
+"""The linear solve already fixes g^2 to within the noise; allow one decade either way."""
+
+CHARGING_ENERGY_TOLERANCE = 0.5
+"""Relative slack around the platform Ec, if Ec is ever released as a free parameter."""
+
+
+def fit_bounds(
+    guess: dict[str, float], scales: SweepScales
+) -> dict[str, tuple[float, float]]:
+    """Parameter bounds derived from the guess and the sweep, not from a fixed table."""
+    normalization_low, normalization_high = normalization_range(scales)
+    return {
+        # one decade around the analytically-solved coupling
+        "g": (guess["g"] / G_BOUND_FACTOR, guess["g"] * G_BOUND_FACTOR),
+        "d": ASYMMETRY_RANGE,
+        # the model is periodic in offset, so one period either side is plenty
+        "offset": (-OFFSET_PERIOD, OFFSET_PERIOD),
+        # half a decade of slack outside what the sweep can resolve
+        "normalization": (normalization_low / 2, normalization_high * 2),
+        # the bare resonator cannot be outside the window we swept
+        "resonator_freq": (
+            guess["resonator_freq"] - scales.freq_span,
+            guess["resonator_freq"] + scales.freq_span,
+        ),
+        "charging_energy": (
+            guess["charging_energy"] * (1 - CHARGING_ENERGY_TOLERANCE),
+            guess["charging_energy"] * (1 + CHARGING_ENERGY_TOLERANCE),
+        ),
+    }
+
+
+def candidate_sampler(
+    candidates: Sequence[dict[str, float]],
+    free_params: Sequence[str],
+    bounds: dict[str, tuple[float, float]],
+    jitter: float = 0.05,
+) -> Callable[[np.random.RandomState], npt.NDArray[np.float64]]:
+    """``p0_sampler`` for :func:`ransac_fit` that draws from the grid candidates."""
+
+    def sampler(rng: np.random.RandomState) -> npt.NDArray[np.float64]:
+        candidate = candidates[rng.randint(len(candidates))]
+        start = []
+        for name in free_params:
+            low, high = bounds[name]
+            value = candidate[name]
+            # scale the perturbation by the parameter itself, falling back to the bound
+            # width for parameters that can legitimately be zero (offset, d)
+            scale = max(abs(value), 0.1 * (high - low))
+            start.append(
+                float(np.clip(value + jitter * scale * rng.randn(), low, high))
+            )
+        return np.array(start)
+
+    return sampler
+
+
+def partial_model(
+    model: Callable[..., np.ndarray],
+    fixed: dict[str, float],
+    param_names: Sequence[str] = ARC_PARAMETERS,
+) -> tuple[Callable[..., np.ndarray], list[str]]:
+    """Freeze some parameters and expose the rest as a curve_fit-compatible signature."""
+    free = [name for name in param_names if name not in fixed]
+
+    def wrapped(x, *values):
+        params = dict(fixed)
+        params.update(zip(free, values))
+        return model(x, *[params[name] for name in param_names])
+
+    wrapped.__signature__ = Signature(
+        [Parameter("x", Parameter.POSITIONAL_OR_KEYWORD)]
+        + [Parameter(name, Parameter.POSITIONAL_OR_KEYWORD) for name in free]
+    )
+    return wrapped, free
+
+
+def validated_inputs(
+    qubit,
+    w_max: float,
+    bare_resonator_frequency: float,
+    charging_energy: float,
+    scales: SweepScales,
+    log,
+) -> tuple[float, float, float]:
+    """Convert the platform values to GHz and check them against the acquired data."""
+    w_max_ghz = w_max * HZ_TO_GHZ
+    if not np.isfinite(w_max_ghz) or w_max_ghz <= 0:
+        raise RuntimeError("qubit frequency is missing from the platform config")
+
+    charging_energy_ghz = charging_energy * HZ_TO_GHZ
+    if (
+        not CHARGING_ENERGY_RANGE_GHZ[0]
+        < charging_energy_ghz
+        < CHARGING_ENERGY_RANGE_GHZ[1]
+    ):
+        log.warning(
+            f"[resonator_flux] qubit {qubit}: charging energy is "
+            f"{charging_energy_ghz} GHz, outside {CHARGING_ENERGY_RANGE_GHZ} GHz; "
+            f"falling back to {DEFAULT_CHARGING_ENERGY_GHZ} GHz"
+        )
+        charging_energy_ghz = DEFAULT_CHARGING_ENERGY_GHZ
+
+    f_bare_ghz = bare_resonator_frequency * HZ_TO_GHZ
+    # tolerance is the swept window, not an arbitrary 0.5 GHz: the bare resonator has to
+    # be somewhere we actually looked
+    if abs(f_bare_ghz - scales.freq_center) > scales.freq_span:
+        log.warning(
+            f"[resonator_flux] qubit {qubit}: bare resonator frequency "
+            f"({f_bare_ghz} GHz) lies outside the swept window "
+            f"({scales.freq_center} +/- {scales.freq_span} GHz); "
+            "using the measured mean instead"
+        )
+        f_bare_ghz = scales.freq_center
+
+    return w_max_ghz, charging_energy_ghz, f_bare_ghz
+
+
+RESIDUAL_THRESHOLD_STEPS = 5.0
+"""RANSAC inlier tolerance, in frequency steps: a point is on the arc if it is within a
+few resolution elements of it."""
+
+F_SCALE_STEPS = 1.0
+"""soft_l1 transition point, in frequency steps (the prototype's '50 kHz ~ one step')."""
+
+OVERDETERMINATION = 2
+"""Require at least this many datapoints per free parameter before fitting."""
+
+
+def fit_arc(
+    qubit,
+    biases: npt.NDArray[np.floating],
+    frequencies: npt.NDArray[np.floating],
+    scales: SweepScales,
+    w_max: float,
+    bare_resonator_frequency: float,
+    charging_energy: float,
+    ransac_fit: Callable[..., tuple[np.ndarray, np.ndarray]],
+    resonator_arc_model: Callable[[float], Callable[..., np.ndarray]],
+    log,
+    fixed_params: Sequence[str] = ("d", "charging_energy"),
+    n_candidates: int = 8,
+) -> tuple[dict[str, float], float, npt.NDArray[np.bool_]]:
+    """Fit a resonator-vs-flux arc: grid seed + RANSAC + soft-L1 refit.
+
+    ``frequencies``/``scales`` must be in GHz; ``w_max``, ``bare_resonator_frequency``
+    and ``charging_energy`` come from the platform in Hz. Returns the parameters (back in
+    Hz), the RMS residual in Hz, and the inlier mask for plotting.
+    """
+    w_max_ghz, charging_energy_ghz, f_bare_ghz = validated_inputs(
+        qubit, w_max, bare_resonator_frequency, charging_energy, scales, log
+    )
+
+    model = resonator_arc_model(w_max_ghz)
+    candidates = grid_initial_guess(
+        model,
+        biases,
+        frequencies,
+        f_bare_ghz,
+        charging_energy_ghz,
+        scales,
+        n_candidates=n_candidates,
+    )
+    guess = candidates[0]
+
+    fixed = {name: guess[name] for name in fixed_params}
+    wrapped, free_params = partial_model(model, fixed)
+
+    # minimum sample size follows the model, instead of the prototype's literal 12
+    required = OVERDETERMINATION * len(free_params)
+    if len(biases) < required:
+        raise RuntimeError(
+            f"only {len(biases)} usable points extracted (need >= {required} for "
+            f"{len(free_params)} free parameters); check the SNR and the frequency window"
+        )
+
+    bounds = fit_bounds(guess, scales)
+    lower = [bounds[name][0] for name in free_params]
+    upper = [bounds[name][1] for name in free_params]
+
+    popt, inliers = ransac_fit(
+        biases,
+        frequencies,
+        wrapped,
+        residual_threshold=RESIDUAL_THRESHOLD_STEPS * scales.freq_step,
+        min_trials=max(20, 2 * n_candidates),
+        bounds=(lower, upper),
+        p0_sampler=candidate_sampler(candidates, free_params, bounds),
+        loss="soft_l1",
+        f_scale=F_SCALE_STEPS * scales.freq_step,
+    )
+
+    params = dict(guess)
+    params.update(zip(free_params, popt))
+    residuals = wrapped(biases[inliers], *popt) - frequencies[inliers]
+    rms = float(np.sqrt(np.mean(residuals**2))) / HZ_TO_GHZ
+
+    for key in ("g", "resonator_freq", "charging_energy"):
+        params[key] /= HZ_TO_GHZ
+
+    return params, rms, inliers

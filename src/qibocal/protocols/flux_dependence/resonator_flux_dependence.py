@@ -301,7 +301,7 @@ def _fit(data: ResonatorFluxData) -> ResonatorFluxResults:
             ],
         )
         try:
-            popt, inliers_mask = utils.ransac_fit(
+            popt, inliers_mask = utils.fit_arc(
                 peak_biases,
                 peak_frequencies,
                 fit_function=fit_function,

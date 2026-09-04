@@ -211,8 +211,8 @@ def _fit(data: ResonatorFluxData) -> ResonatorFluxResults:
             params, _ = utils.fit_qubit(
                 qubit,
                 w_max=data.qubit_frequency[qubit],
-                bare_resonator_frequency=data.bare_resonator_frequency.get(qubit, 0),
-                charging_energy=data.charging_energy.get(qubit, 0),
+                bare_resonator_frequency=data.bare_resonator_frequency[qubit],
+                charging_energy=data.charging_energy[qubit],
                 frequencies=peak_frequencies[inliers_mask],
                 biases=peak_biases[inliers_mask],
             )

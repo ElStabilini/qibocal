@@ -212,6 +212,7 @@ def _update(
     qubit: QubitId,
 ):
     ro_channel = platform.qubits[qubit].acquisition
+    print({f"configs.{ro_channel}.delay": results.time_of_flights[qubit]})
     platform.update({f"configs.{ro_channel}.delay": results.time_of_flights[qubit]})
 
 

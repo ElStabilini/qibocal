@@ -260,12 +260,6 @@ def _fit(data: ResonatorFluxData) -> ResonatorFluxResults:
 
     The protocol aims at extracting the sweetspot, the flux coefficient, the coupling,
     the asymmetry and the dressed resonator frequency.
-
-    The asymmetry is fitted but is frequently not identifiable: near the sweetspot it is
-    degenerate with the flux coefficient, and it is only resolved once the sweep covers
-    a substantial fraction of a flux period. ``utils.fit_arc`` warns when that is the
-    case, and the corresponding diagnostics are returned so that a caller can decide
-    whether to trust the value.
     """
 
     coupling = {}
@@ -280,71 +274,64 @@ def _fit(data: ResonatorFluxData) -> ResonatorFluxResults:
     inliers_dict = {}
 
     for qubit in data.qubits:
-        successful_fit[qubit] = False
         qubit_data = data[qubit]
 
+        freq = np.unique(qubit_data.freq)
+        bias = np.unique(qubit_data.bias)
+        signal = qubit_data.signal.reshape(len(bias), len(freq))
+
+        peak_biases, peak_frequencies = _extract_peak_coordinates(
+            freq=freq,
+            bias=bias,
+            signal=signal,
+        )
+
+        fit_function = _fit_function(data, qubit)
+
+        # bounds for (g, d, offset, normalization, freq, charging_energy)
+        bounds = (
+            [0, 0, -1, 0, data.bare_resonator_frequency[qubit] - 0.5e9, 0],
+            [
+                0.5e9,
+                1,
+                1,
+                np.inf,
+                data.bare_resonator_frequency[qubit] + 0.5e9,
+                data.charging_energy[qubit] + 0.3e9,
+            ],
+        )
         try:
-            freq = np.unique(qubit_data.freq)
-            bias = np.unique(qubit_data.bias)
-
-            # The resonator shows up as a dip in a 2D (coplanar) readout and as a peak
-            # in a 3D one. This is a property of the readout configuration, so it is
-            # fixed for the whole sweep rather than inferred per bias row.
-            find_min = data.resonator_type == "2D"
-
-            peak_frequencies, peak_biases = utils.extract_trace(
-                qubit_data.freq, qubit_data.bias, qubit_data.signal, find_min
-            )
-
-            params, inliers_mask, _ = utils.fit_arc(
-                qubit,
-                bias=peak_biases,
-                frequencies=peak_frequencies,
-                w_max=data.qubit_frequency[qubit],
-                bare_resonator_frequency=data.bare_resonator_frequency[qubit],
-                charging_energy=data.charging_energy[qubit],
+            popt, inliers_mask = utils.ransac_fit(
+                peak_biases,
+                peak_frequencies,
+                fit_function=fit_function,
                 residual_threshold=APPROXIMATE_RESONATOR_PEAK_WIDTH,
-                freq_step=float(np.mean(np.diff(freq))),
+                bounds=bounds,
             )
-
             fitted_parameters[qubit] = {
                 "w_max": data.qubit_frequency[qubit],
                 "xj": 0,
-                "d": params["d"],
-                "normalization": params["normalization"],
-                "offset": params["offset"],
+                "d": popt[1],
+                "normalization": popt[3],
+                "offset": popt[2],
                 "crosstalk_element": 1,
-                "charging_energy": params["charging_energy"],
-                "resonator_freq": params["resonator_freq"],
-                "g": params["g"],
+                "charging_energy": popt[5],
+                "resonator_freq": popt[4],
+                "g": popt[0],
             }
-
-            bias_min, bias_max = np.min(bias), np.max(bias)
+            matrix_element[qubit] = popt[3]
             sweetspot[qubit] = utils.select_sweetspot(
-                params["offset"],
-                params["normalization"],
-                (bias_min, bias_max),
+                popt[2],
+                popt[3],
+                (np.min(data[qubit].bias), np.max(data[qubit].bias)),
                 max_distance=0.3,
             )
-            if not bias_min <= sweetspot[qubit] <= bias_max:
-                log.warning(
-                    f"[resonator_flux] qubit {qubit}: fitted sweetspot "
-                    f"{sweetspot[qubit]:.4f} V is outside the swept range "
-                    f"[{bias_min:.4f}, {bias_max:.4f}] V. The arc extremum was not "
-                    "measured, so this value is an extrapolation - widen bias_width "
-                    "and re-run."
-                )
-
-            resonator_freq[qubit] = utils.transmon_readout_frequency(
-                xi=sweetspot[qubit], **fitted_parameters[qubit]
-            )
-            matrix_element[qubit] = params["normalization"]
-            coupling[qubit] = params["g"]
-            asymmetry[qubit] = params["d"]
+            resonator_freq[qubit] = fit_function(sweetspot[qubit], *popt)
+            coupling[qubit] = popt[0]
+            asymmetry[qubit] = popt[1]
             successful_fit[qubit] = True
 
-            # Stored only once the fit has succeeded: a plot of the extracted trace next
-            # to no fit at all is misleading, so a failure should leave nothing behind.
+            # Store peak coordinates and inliers/outliers for plotting
             peak_biases_dict[qubit] = peak_biases.tolist()
             peak_frequencies_dict[qubit] = peak_frequencies.tolist()
             inliers_dict[qubit] = inliers_mask.tolist()

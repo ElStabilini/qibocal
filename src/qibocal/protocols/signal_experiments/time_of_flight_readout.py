@@ -99,6 +99,7 @@ def _acquisition(
         acq_handle = list(sequence.channel(platform.qubits[qubit].acquisition))[-1].id
         data.data[qubit] = results[acq_handle]
 
+        print({f"configs.{ro_channel}.delay": results.time_of_flights[qubit]})
     return data
 
 

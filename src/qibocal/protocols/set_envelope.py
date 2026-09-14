@@ -145,18 +145,6 @@ class SetEnvelopeParameters(Parameters):
     envelope: dict
     """New envelope, as a raw runcard mapping (e.g. ``{kind: gaussian, rel_sigma: 0.2}``)."""
 
-    def __post_init__(self):
-        if self.target_gate not in SUPPORTED_GATES:
-            raise ValueError(
-                f"Unsupported gate {self.target_gate}, "
-                f"expected one of {', '.join(SUPPORTED_GATES)}."
-            )
-        # `Parameters` are plain dataclasses, so annotating `envelope` as an
-        # `Envelope` would not validate anything. Validating explicitly here
-        # means `Task.__post_init__` rejects a malformed envelope before any
-        # hardware time is spent.
-        TypeAdapter(Envelope).validate_python(self.envelope)
-
 
 @dataclass
 class SetEnvelopeData(Data):

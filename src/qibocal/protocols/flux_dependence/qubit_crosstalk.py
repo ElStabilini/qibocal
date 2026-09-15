@@ -22,7 +22,9 @@ from ...update import replace
 from ..utils import (
     GHZ_TO_HZ,
     HZ_TO_GHZ,
+    format_error_single_cell,
     readout_frequency,
+    round_report,
     table_dict,
     table_html,
 )
@@ -35,6 +37,18 @@ from .qubit_flux_dependence import (
 )
 
 __all__ = ["qubit_crosstalk"]
+
+MINIMUM_SWEETSPOT_DISTANCE = 0.05
+"""Minimum distance, in flux quanta, between the phase of the target qubit at its bias
+point and the closest (anti-)sweetspot.
+
+At a sweetspot the model is even in the bias of the neighbor qubit, therefore the sign of
+the crosstalk element is not encoded in the data. Data acquired too close to one of them
+is rejected instead of returning an element with a random sign."""
+
+MAXIMUM_PHASE_DRIFT = 0.05
+"""Maximum distance, in flux quanta, between the fitted and the calibrated phase of the
+target qubit at its bias point before the flux calibration is reported as stale."""
 
 
 @dataclass
@@ -89,6 +103,10 @@ class QubitCrosstalkResults(QubitFluxResults):
     """Expected qubit frequency at bias point."""
     crosstalk_matrix: dict[QubitId, dict[QubitId, float]] = field(default_factory=dict)
     """Crosstalk matrix element."""
+    crosstalk_matrix_error: dict[QubitId, dict[QubitId, float]] = field(
+        default_factory=dict
+    )
+    """Uncertainty on the crosstalk matrix element."""
     fitted_parameters: dict[tuple[QubitId, QubitId], dict] = field(default_factory=dict)
     """Fitted parameters for each couple target-flux qubit."""
     successful_fit: dict[tuple[QubitId, QubitId], bool] = field(default_factory=dict)
@@ -216,31 +234,101 @@ def _acquisition(
     return data
 
 
-def _fit_function(data: QubitCrosstalkData, target_qubit: QubitId):
+def _phase_bias_point(data: QubitCrosstalkData, target_qubit: QubitId) -> float:
+    r"""Phase of the target qubit at its bias point, with the neighbor qubits grounded.
 
-    def func(x, crosstalk_element, offset):
+    It corresponds to :math:`V_{ii} (x_i - x_{ss})`, the quantity that fixes the sign of
+    the measured crosstalk element through :math:`\sin(2 \pi \varphi_0)`.
+    """
+    return (
+        data.bias_point[target_qubit] * data.matrix_element[target_qubit]
+        + data.offset[target_qubit]
+    )
+
+
+def _fit_function(data: QubitCrosstalkData, target_qubit: QubitId):
+    """Fit function in terms of the off-diagonal element and of the phase at zero bias.
+
+    Fitting ``crosstalk_element`` and ``offset`` as independent parameters is degenerate:
+    the bias of the target qubit only enters the model through the constant
+    ``xi * normalization``, which ``offset`` absorbs entirely, and the pairs
+    ``(c, offset)`` and ``(-c, n - 2 * xi * normalization - offset)`` describe the same
+    curve. Here the whole constant term is fitted as ``phase``, which is restricted to a
+    single half period in :func:`_fit` and therefore admits no mirror image.
+    """
+
+    def func(x, element, phase):
         return utils.transmon_frequency(
-            xi=data.bias_point[target_qubit],
+            xi=0,
             xj=x,
             d=0,
             w_max=data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
-            offset=offset,
-            normalization=data.matrix_element[target_qubit],
+            offset=phase,
+            normalization=1,
             charging_energy=data.charging_energy[target_qubit] * HZ_TO_GHZ,
-            crosstalk_element=crosstalk_element,
+            crosstalk_element=element,
         )
 
     return func
 
 
+def _element_guess(
+    frequencies: npt.NDArray,
+    biases: npt.NDArray,
+    phase: float,
+    w_max: float,
+    charging_energy: float,
+) -> float:
+    r"""Initial guess for the off-diagonal element from the local slope of the feature.
+
+    Over a narrow bias window the model is almost linear, with
+
+    .. math::
+        \frac{\partial f}{\partial x_j} = - \frac{\pi}{4} (w_{max} + E_c)
+        \cos^2(\pi \varphi_0)^{-3/4} \sin(2 \pi \varphi_0) V_{ij}
+
+    which is inverted here. Frequencies and energies are expected in GHz. Without a guess
+    the fit starts from :math:`V_{ij} = 1`, orders of magnitude away from a typical
+    crosstalk element.
+    """
+    slope = np.polyfit(biases, frequencies, 1)[0]
+    return (
+        -4
+        * slope
+        * (np.cos(np.pi * phase) ** 2) ** 0.75
+        / (np.pi * (w_max + charging_energy) * np.sin(2 * np.pi * phase))
+    )
+
+
 def _fit(data: QubitCrosstalkData) -> QubitCrosstalkResults:
     crosstalk_matrix = {qubit: {} for qubit in data.qubit_frequency}
+    crosstalk_matrix_error = {qubit: {} for qubit in data.qubit_frequency}
     fitted_parameters = {}
     qubit_frequency_bias_point = {}
     successful_fit = {}
 
     for target_flux_qubit, qubit_data in data.data.items():
         target_qubit, flux_qubit = target_flux_qubit
+        successful_fit[target_flux_qubit] = False
+
+        if target_qubit not in data.bias_point:
+            log.error(
+                f"Error in qubit_crosstalk protocol fit: no bias point provided "
+                f"for qubit {target_qubit}."
+            )
+            continue
+
+        phase = _phase_bias_point(data, target_qubit)
+        # At a (anti-)sweetspot the model is even in the bias of the neighbor qubit and
+        # the sign of the crosstalk element cannot be recovered from the data.
+        if abs(phase - np.round(2 * phase) / 2) < MINIMUM_SWEETSPOT_DISTANCE:
+            log.error(
+                f"Error in qubit_crosstalk protocol fit: qubit {target_qubit} is biased "
+                f"too close to a sweetspot (phase {phase:.3f}), the sign of the "
+                f"crosstalk element is not determined. Repeat the acquisition with a "
+                f"different bias point."
+            )
+            continue
 
         frequencies, biases = utils.flux_extract_feature(
             qubit_data.freq,
@@ -250,51 +338,80 @@ def _fit(data: QubitCrosstalkData) -> QubitCrosstalkResults:
         )
 
         if frequencies is None or biases is None:
-            successful_fit[target_flux_qubit] = False
+            continue
 
-        else:
-            qubit_frequency_bias_point[target_qubit] = (
-                utils.transmon_frequency(
-                    xi=data.bias_point[target_qubit],
-                    xj=0,
-                    d=0,
-                    w_max=data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
-                    offset=data.offset[target_qubit],
-                    normalization=data.matrix_element[target_qubit],
-                    charging_energy=data.charging_energy[target_qubit] * HZ_TO_GHZ,
-                    crosstalk_element=1,
-                )
-                * GHZ_TO_HZ
+        qubit_frequency_bias_point[target_qubit] = (
+            utils.transmon_frequency(
+                xi=data.bias_point[target_qubit],
+                xj=0,
+                d=0,
+                w_max=data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
+                offset=data.offset[target_qubit],
+                normalization=data.matrix_element[target_qubit],
+                charging_energy=data.charging_energy[target_qubit] * HZ_TO_GHZ,
+                crosstalk_element=1,
             )
+            * GHZ_TO_HZ
+        )
 
-            try:
-                popt, _ = curve_fit(
-                    _fit_function(data, target_qubit),
-                    biases,
-                    frequencies * HZ_TO_GHZ,
-                    bounds=((-np.inf, -1), (np.inf, 1)),
-                    maxfev=100000,
+        # The degeneracy is a reflection around the (anti-)sweetspots, so restricting
+        # the phase to the half period selected by the calibration removes both the
+        # mirror solution and the aliases, while still allowing the fit to absorb the
+        # drift of the flux calibration.
+        half_period = np.floor(2 * phase)
+        try:
+            popt, pcov = curve_fit(
+                _fit_function(data, target_qubit),
+                biases,
+                frequencies * HZ_TO_GHZ,
+                p0=(
+                    _element_guess(
+                        frequencies * HZ_TO_GHZ,
+                        biases,
+                        phase,
+                        w_max=data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
+                        charging_energy=data.charging_energy[target_qubit] * HZ_TO_GHZ,
+                    ),
+                    phase,
+                ),
+                bounds=(
+                    (-np.inf, half_period / 2),
+                    (np.inf, (half_period + 1) / 2),
+                ),
+                maxfev=100000,
+            )
+            element, fitted_phase = float(popt[0]), float(popt[1])
+            if abs(fitted_phase - phase) > MAXIMUM_PHASE_DRIFT:
+                log.warning(
+                    f"Fitted phase of qubit {target_qubit} deviates by "
+                    f"{fitted_phase - phase:.3f} from the calibrated one: the flux "
+                    f"calibration may be outdated and the sign of the crosstalk "
+                    f"element unreliable."
                 )
-                fitted_parameters[target_qubit, flux_qubit] = {
-                    "xi": data.bias_point[target_qubit],
-                    "d": 0,
-                    "w_max": data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
-                    "offset": popt[1],
-                    "normalization": data.matrix_element[target_qubit],
-                    "charging_energy": data.charging_energy[target_qubit] * HZ_TO_GHZ,
-                    "crosstalk_element": float(popt[0]),
-                }
-                crosstalk_matrix[target_qubit][flux_qubit] = (
-                    popt[0] * data.matrix_element[target_qubit]
-                )
-                successful_fit[target_flux_qubit] = True
-            except (RuntimeError, ValueError) as e:  # pragma: no cover
-                successful_fit[target_flux_qubit] = False
-                log.error(f"Error in qubit_crosstalk protocol fit: {e} ")
+            fitted_parameters[target_qubit, flux_qubit] = {
+                "xi": data.bias_point[target_qubit],
+                "d": 0,
+                "w_max": data.qubit_frequency[target_qubit] * HZ_TO_GHZ,
+                # rewrite the fitted phase as an offset, so that the fitted parameters
+                # can be fed back to utils.transmon_frequency when plotting
+                "offset": fitted_phase
+                - data.bias_point[target_qubit] * data.matrix_element[target_qubit],
+                "normalization": data.matrix_element[target_qubit],
+                "charging_energy": data.charging_energy[target_qubit] * HZ_TO_GHZ,
+                "crosstalk_element": element / data.matrix_element[target_qubit],
+            }
+            crosstalk_matrix[target_qubit][flux_qubit] = element
+            crosstalk_matrix_error[target_qubit][flux_qubit] = float(
+                np.sqrt(pcov[0, 0])
+            )
+            successful_fit[target_flux_qubit] = True
+        except (RuntimeError, ValueError) as e:  # pragma: no cover
+            log.error(f"Error in qubit_crosstalk protocol fit: {e} ")
 
     return QubitCrosstalkResults(
         qubit_frequency_bias_point=qubit_frequency_bias_point,
         crosstalk_matrix=crosstalk_matrix,
+        crosstalk_matrix_error=crosstalk_matrix_error,
         fitted_parameters=fitted_parameters,
         successful_fit=successful_fit,
     )
@@ -319,7 +436,18 @@ def _plot(data: QubitCrosstalkData, fit: QubitCrosstalkResults, target: QubitId)
                 labels.append(f"Crosstalk with qubit {flux_qubit} [V^-1]")
             else:
                 labels.append("Flux dependence [V^-1]")
-            values.append(np.round(fit.crosstalk_matrix[target][flux_qubit], 4))
+            values.append(
+                format_error_single_cell(
+                    round_report(
+                        [
+                            (
+                                fit.crosstalk_matrix[target][flux_qubit],
+                                fit.crosstalk_matrix_error[target][flux_qubit],
+                            )
+                        ]
+                    )
+                )
+            )
         fitting_report = table_html(
             table_dict(
                 target,

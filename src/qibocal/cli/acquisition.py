@@ -38,14 +38,9 @@ def acquire(runcard: Runcard, folder: Path, force: bool):
     platform.connect()
 
     # run
-    try:
-        meta.start()
-        history = runcard.run(
-            output=path, platform=platform, mode=ExecutionMode.ACQUIRE
-        )
-        meta.end()
-    finally:
-        platform.disconnect()
+    meta.start()
+    history = runcard.run(output=path, platform=platform, mode=ExecutionMode.ACQUIRE)
+    meta.end()
 
     # TODO: implement iterative dump of report...
 

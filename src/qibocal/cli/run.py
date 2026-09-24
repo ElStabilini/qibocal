@@ -41,17 +41,15 @@ def protocols_execution(runcard: Runcard, folder: Path, force, update):
     platform.connect()
 
     # run
-    try:
-        meta.start()
-        history = runcard.run(
-            output=path,
-            platform=platform,
-            mode=AUTOCALIBRATION,
-            update=update,
-        )
-        meta.end()
-    finally:
-        platform.disconnect()
+    meta.start()
+    history = runcard.run(
+        output=path,
+        platform=platform,
+        mode=AUTOCALIBRATION,
+        update=update,
+    )
+    meta.end()
+
     # TODO: implement iterative dump of report...
 
     # stop and disconnect platform

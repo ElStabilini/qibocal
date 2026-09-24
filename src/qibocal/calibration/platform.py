@@ -28,6 +28,7 @@ class CalibrationPlatform(Platform):
         logs an error and raises a ValueError.
         """
 
+        super().__post_init__()
         natives = self.parameters.native_gates.single_qubit
         for q in self.qubits:
             phase_rx = (

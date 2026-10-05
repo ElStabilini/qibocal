@@ -38,6 +38,9 @@ __all__ = [
     "qubit_flux",
 ]
 
+# approximate width of a peak in the qubit spectroscopy
+APPROXIMATE_QUBIT_PEAK_WIDTH = 0.2e6
+
 
 @dataclass
 class QubitFluxParameters(utils.FluxFrequencySweepParameters):
@@ -358,8 +361,9 @@ def _fit(data: QubitFluxData) -> QubitFluxResults:
                 peak_biases,
                 peak_frequencies,
                 fit_function=_fit_function(data, qubit),
-                # approximate width of a peak in the qubit spectroscopy
-                residual_threshold=0.2e6,
+                residual_threshold=utils.adaptive_residual_threshold(
+                    APPROXIMATE_QUBIT_PEAK_WIDTH, freq
+                ),
                 bounds=bounds,
             )
 

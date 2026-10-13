@@ -119,8 +119,9 @@ def _acquisition(
 ) -> QubitFluxData:
     """Data acquisition for QubitFlux Experiment.
 
-    As in qubit spectroscopy, the frequency sweep of each qubit is split in batches,
-    each within the IF bandwidth of its drive LO, and the batches are stitched in IQ.
+    As in qubit spectroscopy, if the frequency window exceeds the IF bandwidth, the
+    frequency axis is split into batches, and the drive LOs are retuned for the batches
+    which do not fit within the IF bandwidth from the current LO.
     """
 
     qubit_frequency = {}

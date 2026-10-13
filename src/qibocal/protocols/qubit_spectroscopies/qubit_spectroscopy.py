@@ -124,6 +124,43 @@ def _calculate_batches(
     return np.vstack((batch_limits, lo_offsets)).T
 
 
+def _drive_lo_updates(
+    platform: CalibrationPlatform,
+    frequencies: dict[QubitId, npt.NDArray[np.float64]],
+    max_if_bandwidth: float = 300e6,
+) -> dict[ChannelId, dict[str, float]]:
+    """Platform updates retuning the drive LOs, where needed, to sweep ``frequencies``.
+
+    Each LO is left untouched when all the frequencies lie within ``max_if_bandwidth`` from it,
+    otherwise, it is moved to the centre of those frequencies, together with
+    the drive channels, to pass qibolab's IF validation.
+    """
+    sweeps = defaultdict(list)
+    for qubit, freqs in frequencies.items():
+        drive_channel = platform.qubits[qubit].drive
+        assert drive_channel is not None
+        channel = platform.channels[drive_channel]
+        lo = channel.lo if isinstance(channel, IqChannel) else None
+        sweeps[lo if lo is not None else drive_channel].append((drive_channel, freqs))
+
+    updates = {}
+    for lo, lo_sweeps in sweeps.items():
+        freqs = np.concatenate([f for _, f in lo_sweeps])
+        lo_frequency = platform.config(lo).frequency
+        if np.max(np.abs(freqs - lo_frequency)) <= max_if_bandwidth:
+            continue
+        center = (np.min(freqs) + np.max(freqs)) / 2
+        if np.max(freqs) - center > max_if_bandwidth:
+            raise ValueError(
+                f"Frequencies swept on the drive channels sharing {lo} span more than "
+                f"{2 * max_if_bandwidth:.0f} Hz, they cannot be covered by a single LO."
+            )
+        updates[lo] = {"frequency": center}
+        for drive_channel, _ in lo_sweeps:
+            updates[drive_channel] = {"frequency": center}
+    return updates
+
+
 def _acquisition(
     params: QubitSpectroscopyParameters,
     platform: CalibrationPlatform,
@@ -139,22 +176,13 @@ def _acquisition(
     width, step = freq_range[1] - freq_range[0], freq_range[2]
     batches = _calculate_batches(freq_width=width)
 
-    # Get drive channels and LO channels for each qubit
     drive_channels: dict[QubitId, ChannelId] = {}
-    lo_channels: dict[QubitId, str | None] = {}
     f0: dict[QubitId, float] = {}
     for qubit in targets:
         drive_channel = platform.qubits[qubit].drive
         assert drive_channel is not None
         drive_channels[qubit] = drive_channel
         f0[qubit] = params.f0(cast(IqConfig, platform.config(drive_channel)).frequency)
-
-        # Get the LO channel associated with this drive channel
-        channel_obj = platform.channels[drive_channels[qubit]]
-        if isinstance(channel_obj, IqChannel) and channel_obj.lo is not None:
-            lo_channels[qubit] = channel_obj.lo
-        else:
-            lo_channels[qubit] = None
 
     # Initialize storage for intermediate results
     values = {qubit: defaultdict(list) for qubit in targets}
@@ -165,7 +193,7 @@ def _acquisition(
     }
 
     # Execute each batch
-    for start, end, lo_offset in batches:
+    for start, end, _ in batches:
         # Build the pulse sequence
         sequence = PulseSequence()
         freq_ranges = {}
@@ -200,25 +228,15 @@ def _acquisition(
                 )
             )
 
-        # Prepare updates for this batch
-        batch_updates = []
-        for qubit in targets:
-            update_dict = {}
-
-            # Update the frequency of the drive channel to avoid raising a validation an error
-            update_dict[drive_channels[qubit]] = {"frequency": f0[qubit] + lo_offset}
-
-            # If we're batching, update the LO
-            if lo_offset != 0 and lo_channels[qubit] is not None:
-                update_dict[lo_channels[qubit]] = {"frequency": f0[qubit] + lo_offset}
-
-            batch_updates.append(update_dict)
-
         # Execute this batch
         results = platform.execute(
             [sequence],
             [sweepers],
-            updates=batch_updates,
+            updates=[
+                _drive_lo_updates(
+                    platform, {q: np.arange(*freq_ranges[q]) for q in targets}
+                )
+            ],
             averaging_mode=AveragingMode.CYCLIC,
             acquisition_type=AcquisitionType.INTEGRATION,
             nshots=params.nshots,
@@ -352,36 +370,43 @@ def _fit(data: QubitSpectroscopyData) -> QubitSpectroscopyResults:
 
 
 def _plot(data: QubitSpectroscopyData, target: QubitId, fit: QubitSpectroscopyResults):
-    figures = []
+    """Plot QubitSpectroscopy.
+
+    A single figure is built with two side-by-side panels: the signal
+    magnitude and the signal phase. A Lorentzian fit is overlaid on the
+    magnitude panel when a fit is available.
+    """
+    fitting_report = ""
+    frequencies = np.array(data.drive_frequencies[target])
+
     fig = make_subplots(
         rows=1,
         cols=2,
-        horizontal_spacing=0.1,
         vertical_spacing=0.1,
+        horizontal_spacing=0.1,
+        subplot_titles=(
+            "Signal",
+            "Phase",
+        ),
     )
-    fitting_report = ""
-    frequencies = np.array(data.drive_frequencies[target])
-    signal = data.signal(target)
-    phase = data.phase(target)
 
     fig.add_trace(
         go.Scatter(
-            x=frequencies * scipy.constants.nano,
-            y=signal,
+            x=frequencies * scipy.constants.nano,  # plotting in GHz
+            y=data.signal(target),
             opacity=1,
-            name="Frequency",
+            name="Signal",
             showlegend=True,
-            legendgroup="Frequency",
+            legendgroup="Signal",
             mode="markers",
         ),
         row=1,
         col=1,
     )
-
     fig.add_trace(
         go.Scatter(
-            x=frequencies * scipy.constants.nano,
-            y=phase,
+            x=frequencies * scipy.constants.nano,  # plotting in GHz
+            y=data.phase(target),
             opacity=1,
             name="Phase",
             showlegend=True,
@@ -392,17 +417,16 @@ def _plot(data: QubitSpectroscopyData, target: QubitId, fit: QubitSpectroscopyRe
         col=2,
     )
 
-    freqrange = np.linspace(
-        min(frequencies),
-        max(frequencies),
-        2 * len(frequencies),
-    )
-
     if fit is not None:
+        freqrange = np.linspace(
+            min(frequencies),
+            max(frequencies),
+            2 * len(frequencies),
+        )
         params = fit.fitted_parameters[target]
         fig.add_trace(
             go.Scatter(
-                x=freqrange * scipy.constants.nano,
+                x=freqrange * scipy.constants.nano,  # plotting in GHz
                 y=_lorentzian_with_offset(freqrange, *params),
                 name="Fit",
                 mode="lines",
@@ -425,14 +449,13 @@ def _plot(data: QubitSpectroscopyData, target: QubitId, fit: QubitSpectroscopyRe
 
     fig.update_layout(
         showlegend=True,
-        xaxis_title="Frequency [GHz]",
         yaxis_title="Signal [a.u.]",
-        xaxis2_title="Frequency [GHz]",
+        xaxis_title="Frequency [GHz]",
         yaxis2_title="Phase [rad]",
+        xaxis2_title="Frequency [GHz]",
     )
-    figures.append(fig)
 
-    return figures, fitting_report
+    return [fig], fitting_report
 
 
 def _update(

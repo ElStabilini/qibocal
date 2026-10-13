@@ -13,7 +13,6 @@ from qibolab import (
     Rectangular,
     Sweeper,
 )
-from qibolab._core.components import IqChannel
 from scipy.signal import find_peaks
 
 from qibocal.auto.operation import Data, Protocol, QubitId, Results
@@ -22,7 +21,10 @@ from qibocal.config import log
 from qibocal.result import magnitude
 
 from ... import update
-from ..qubit_spectroscopies.qubit_spectroscopy import _calculate_batches
+from ..qubit_spectroscopies.qubit_spectroscopy import (
+    _calculate_batches,
+    _drive_lo_updates,
+)
 from ..utils import (
     readout_frequency,
     table_dict,
@@ -115,7 +117,9 @@ def _acquisition(
 ) -> QubitFluxData:
     """Data acquisition for QubitFlux Experiment.
 
-    As in qubit spectroscopy, if the frequency window exceeds the IF bandwidth, the frequency axis is split into batches.
+    As in qubit spectroscopy, if the frequency window exceeds the IF bandwidth, the
+    frequency axis is split into batches, and the drive LOs are retuned for the batches
+    which do not fit within the IF bandwidth from the current LO.
     """
 
     sequence = PulseSequence()
@@ -123,7 +127,6 @@ def _acquisition(
     qd_pulses = {}
     qubit_frequency = {}
     drive_channels = {}
-    lo_channels = {}
     freq_ranges = {}
     offset_sweepers = []
     for q in targets:
@@ -141,13 +144,6 @@ def _acquisition(
         qubit_frequency[q] = frequency0 = platform.config(qd_channel).frequency
         drive_channels[q] = qd_channel
         freq_ranges[q] = params.frequency_range(frequency0)
-
-        # Get the LO channel associated with this drive channel (as in qubit spectroscopy)
-        channel_obj = platform.channels[qd_channel]
-        if isinstance(channel_obj, IqChannel) and channel_obj.lo is not None:
-            lo_channels[q] = channel_obj.lo
-        else:
-            lo_channels[q] = None
 
         sequence.append((qd_channel, qd_pulse))
         sequence.append((ro_channel, Delay(duration=qd_pulse.duration)))
@@ -179,10 +175,11 @@ def _acquisition(
     f0 = {q: (freq_ranges[q][0] + freq_ranges[q][1]) / 2 for q in targets}
 
     batches = _calculate_batches(freq_width=width)
+    # only stitching batches makes the fit unreliable, a retuned LO alone does not
     data.wide_scan = len(batches) > 1
 
     raw_results = defaultdict(list)
-    for i, (batch_start, batch_end, lo_offset) in enumerate(batches):
+    for i, (batch_start, batch_end, _) in enumerate(batches):
         # open-ended outer edges, so that no point is lost to rounding
         lower = batch_start if i > 0 else -np.inf
         upper = batch_end if i < len(batches) - 1 else np.inf
@@ -190,24 +187,20 @@ def _acquisition(
         if not selected.any():
             continue
 
-        batch_updates = []
-        for q in targets:
-            update_dict = {
+        batch_frequencies = {q: f0[q] + relative[selected] for q in targets}
+        batch_updates = [
+            {
                 platform.qubits[q].probe: {"frequency": readout_frequency(q, platform)},
                 platform.qubits[q].flux: {"offset": 0.0},
             }
-            if data.wide_scan:
-                # Same updates as qubit spectroscopy: drive channel frequency to pass
-                # qibolab's IF validation, and LO moved to the centre of the batch.
-                update_dict[drive_channels[q]] = {"frequency": f0[q] + lo_offset}
-                if lo_channels[q] is not None:
-                    update_dict[lo_channels[q]] = {"frequency": f0[q] + lo_offset}
-            batch_updates.append(update_dict)
+            for q in targets
+        ]
+        batch_updates.append(_drive_lo_updates(platform, batch_frequencies))
 
         freq_sweepers = [
             Sweeper(
                 parameter=Parameter.frequency,
-                values=f0[q] + relative[selected],
+                values=batch_frequencies[q],
                 channels=[drive_channels[q]],
             )
             for q in targets

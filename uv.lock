@@ -871,14 +871,14 @@ wheels = [
 
 [[package]]
 name = "mako"
-version = "1.4.1"
+version = "1.4.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markupsafe" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2a/12/b5fa2353e2754cd67fb9f83793fa48ff42c213a5da7e719869d2301f6ab8/mako-1.4.1.tar.gz", hash = "sha256:d7904710b662996425a21627710c4777c45053146942cf8a7aebf757c92b8c27", size = 410165, upload-time = "2026-08-05T06:10:56.611Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/7f/0b891a82379ffd96d2d8cc6d435fb1055cdaed52829287f81d2a43fd71cb/mako-1.4.2.tar.gz", hash = "sha256:7227a060ee3af55a493af61d73d6beef13044b81dba9586736c13945f09464ce", size = 412231, upload-time = "2026-09-22T20:40:55.06Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a5/54/12ed58d458474aaab5c3d180173e745a4fe131bb330370596876d19ff60f/mako-1.4.1-py3-none-any.whl", hash = "sha256:a359d9a94a541213958742b2698d0a7757bb83551767bc468a74b9905aba9617", size = 80010, upload-time = "2026-08-05T06:10:58.248Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/bb/0e4c30a18858adebc75496ea8a8c3fb65cbf4b36ea1c5028ed8a0a5fa196/mako-1.4.2-py3-none-any.whl", hash = "sha256:e70a2a4308952b33a21208bfd6725da79fae5a8c224578f8cfdeb60e5ace03df", size = 80163, upload-time = "2026-09-22T20:40:56.423Z" },
 ]
 
 [[package]]
@@ -1800,7 +1800,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.8.0,<3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0,<7.0.0" },
     { name = "qibo", specifier = ">=0.3.1,<0.4.0" },
-    { name = "qibolab", specifier = ">=0.2.16,<0.3.0" },
+    { name = "qibolab", specifier = ">=0.2.17,<0.3.0" },
     { name = "scikit-learn", specifier = ">=1.3.0,<2.0.0" },
     { name = "scipy", specifier = ">=1.10.1,<2.0.0" },
     { name = "skops", specifier = ">=0.14.0,<0.15.0" },
@@ -1828,18 +1828,20 @@ tests = [
 
 [[package]]
 name = "qibolab"
-version = "0.2.16"
+version = "0.2.17"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "requests" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/27/f0/db4099cfedc574a1d62e22ccdba35b315c65b5c1d1ba6b45aa4b353d94b6/qibolab-0.2.16.tar.gz", hash = "sha256:c72c13cad2ce0582819ff73fc395e685dc64dfb5bec5f475c6cd244dc2265843", size = 137518, upload-time = "2026-07-16T06:42:19.069Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f5/43/e8b3dace94136583cec303fa1c6f22a827195d669d2a0ed7bb14b1d3ec21/qibolab-0.2.17.tar.gz", hash = "sha256:3a92ba15b6c9f4e9e0857d7e53c50344b5ce962cedd1028951cef75ecaf2c874", size = 139390, upload-time = "2026-10-06T13:16:58.183Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/f8/6372af39f3f52e445237792cecf8ae1acb9113903eb7be1dda5a7e3b5421/qibolab-0.2.16-py3-none-any.whl", hash = "sha256:816b161e9d6cb6fc157cdbf3d6c7b745faeda8a98689cee3283118d67837597c", size = 187297, upload-time = "2026-07-16T06:42:17.771Z" },
+    { url = "https://files.pythonhosted.org/packages/ce/d6/b97499fa40577f8caac4fe79653f25273543315ef2ff7cdecdc331bea94e/qibolab-0.2.17-py3-none-any.whl", hash = "sha256:cc5a6acdb7ab9b2e93a1dfff448df5a9ca4844468c9c53c1529bac9c88fb2a26", size = 190884, upload-time = "2026-10-06T13:16:56.734Z" },
 ]
 
 [[package]]
@@ -2414,11 +2416,11 @@ wheels = [
 
 [[package]]
 name = "urllib3"
-version = "2.7.0"
+version = "2.8.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/0c/06f8b233b8fd13b9e5ee11424ef85419ba0d8ba0b3138bf360be2ff56953/urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c", size = 433602, upload-time = "2026-05-07T16:13:18.596Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e3/05/b17359e1cefb4f909b5e40b1b90a496d987258916dbbf88e842c729f510e/urllib3-2.8.0.tar.gz", hash = "sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63", size = 458972, upload-time = "2026-09-15T19:29:36.253Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/3e/5db95bcf282c52709639744ca2a8b149baccf648e39c8cc87553df9eae0c/urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897", size = 131087, upload-time = "2026-05-07T16:13:17.151Z" },
+    { url = "https://files.pythonhosted.org/packages/92/9d/c4e665119135114480843e7ab388fa94d8480650450e6f8e26b70d323a4c/urllib3-2.8.0-py3-none-any.whl", hash = "sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3", size = 135717, upload-time = "2026-09-15T19:29:34.577Z" },
 ]
 
 [[package]]

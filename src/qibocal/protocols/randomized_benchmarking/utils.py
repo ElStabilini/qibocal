@@ -685,10 +685,10 @@ def add_inverse_layer(
                 circuit.add(gate)
     else:  # single qubit gate circuit
         if circuit.depth > 0:
-            circuit.add(
-                gates.Unitary(circuit.unitary(), *range(circuit.nqubits)).dagger()
-            )
-
+            unitary = np.eye(2, dtype=complex)
+            for gate in circuit.queue:
+                unitary = np.asarray(gate.matrix()) @ unitary
+            circuit.add(gates.Unitary(unitary, 0).dagger())
 
 def add_measurement_layer(circuit: Circuit):
     """Adds a measurement layer at the end of the circuit.

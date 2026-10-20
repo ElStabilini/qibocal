@@ -203,35 +203,30 @@ def _plan_batches(
     return batches
 
 
-def _acquisition(
-    params: QubitSpectroscopyParameters,
+def _plan_drive_batches(
     platform: CalibrationPlatform,
-    targets: list[QubitId],
-) -> QubitSpectroscopyData:
-    """Data acquisition for qubit spectroscopy.
+    frequencies: dict[QubitId, npt.NDArray[np.float64]],
+) -> tuple[
+    dict[QubitId, ChannelId | None],
+    dict[QubitId, float | None],
+    dict[QubitId, list[_Batch]],
+]:
+    """Split the drive sweep of each qubit in batches, see :func:`_plan_batches`.
 
-    Handles wideband spectroscopy by splitting the sweep of each qubit in batches,
-    each within the IF bandwidth of its LO.
+    Returns the drive LO channel of each qubit, its current frequency, and the
+    batches.
     """
-
-    drive_channels: dict[QubitId, ChannelId] = {}
     lo_channels: dict[QubitId, ChannelId | None] = {}
     lo_frequencies: dict[QubitId, float | None] = {}
     batches: dict[QubitId, list[_Batch]] = {}
-    for qubit in targets:
+    for qubit, freqs in frequencies.items():
         drive_channel = platform.qubits[qubit].drive
         assert drive_channel is not None
-        drive_channels[qubit] = drive_channel
         lo = lo_channels[qubit] = platform.channels[drive_channel].lo
         lo_frequencies[qubit] = (
             platform.config(lo).frequency if lo is not None else None
         )
-        frequencies = np.arange(
-            *params.frequency_range(
-                cast(IqConfig, platform.config(drive_channel)).frequency
-            )
-        )
-        batches[qubit] = _plan_batches(frequencies, lo_frequencies[qubit])
+        batches[qubit] = _plan_batches(freqs, lo_frequencies[qubit])
         if any(
             b.anchor and b.lo_frequency != lo_frequencies[qubit] for b in batches[qubit]
         ):
@@ -253,6 +248,32 @@ def _acquisition(
                 f"Qubits {qubits} share the drive LO {lo}, which would need to be moved "
                 "to sweep the requested frequencies."
             )
+    return lo_channels, lo_frequencies, batches
+
+
+def _acquisition(
+    params: QubitSpectroscopyParameters,
+    platform: CalibrationPlatform,
+    targets: list[QubitId],
+) -> QubitSpectroscopyData:
+    """Data acquisition for qubit spectroscopy.
+
+    Handles wideband spectroscopy by splitting the sweep of each qubit in batches,
+    each within the IF bandwidth of its LO.
+    """
+
+    drive_channels: dict[QubitId, ChannelId] = {}
+    sweeps: dict[QubitId, npt.NDArray[np.float64]] = {}
+    for qubit in targets:
+        drive_channel = platform.qubits[qubit].drive
+        assert drive_channel is not None
+        drive_channels[qubit] = drive_channel
+        sweeps[qubit] = np.arange(
+            *params.frequency_range(
+                cast(IqConfig, platform.config(drive_channel)).frequency
+            )
+        )
+    lo_channels, lo_frequencies, batches = _plan_drive_batches(platform, sweeps)
 
     # Initialize storage for intermediate results
     values = {qubit: defaultdict(list) for qubit in targets}
@@ -446,38 +467,36 @@ def _batch_step(
 ) -> tuple[complex, float]:
     """Signal step of the ``outer`` batch with respect to the ``inner`` one.
 
-    The step is the mean complex difference over the shared frequencies, returned
-    together with its standard error.
+    The step is the mean complex difference over the shared frequencies (the last
+    axis of ``signal``, any leading axis is averaged as well), returned together
+    with its standard error.
     """
     shared = np.isin(
         frequencies, np.intersect1d(frequencies[inner], frequencies[outer])
     )
-    difference = signal[outer & shared] - signal[inner & shared]
-    return difference.mean(), difference.std(ddof=1) / np.sqrt(len(difference))
+    difference = signal[..., outer & shared] - signal[..., inner & shared]
+    return difference.mean(), difference.std(ddof=1) / np.sqrt(difference.size)
 
 
-def _stitch(
-    data: QubitSpectroscopyData, qubit: QubitId, step_threshold: float = 3
+def _stitch_batches(
+    frequencies: npt.NDArray[np.float64],
+    signal: npt.NDArray[np.complex128],
+    batch: npt.NDArray[np.int64],
+    anchor: int,
+    nbatches: int,
+    step_threshold: float = 3,
 ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], list[float], list[bool]]:
-    """Align the batches of ``qubit`` to its anchor batch, and merge them.
+    """Align the batches to the ``anchor`` one, and merge them.
 
+    ``frequencies`` and ``batch`` label the last axis of the complex ``signal``.
     The step between adjacent batches is chained outward from the anchor, and
-    subtracted in IQ. The points shared by multiple batches are averaged.
+    subtracted in IQ. Any leading axis of ``signal`` shares the same steps. The
+    points shared by multiple batches are averaged.
 
     Returns the merged frequencies and IQ signal, together with the step of each
     batch and whether it is larger than ``step_threshold`` times its
     standard error.
     """
-    frequencies = np.array(data.drive_frequencies[qubit])
-    iq = np.asarray(data.data[qubit])
-    if qubit not in data.batch_indices:
-        return frequencies, iq, [], []
-
-    batch = np.array(data.batch_indices[qubit])
-    anchor = data.anchor_batch[qubit]
-    nbatches = len(data.lo_frequencies[qubit])
-    signal = iq[..., 0] + 1j * iq[..., 1]
-
     steps = np.zeros(nbatches, dtype=complex)
     errors = np.zeros(nbatches)
     offsets = np.zeros(nbatches, dtype=complex)
@@ -494,14 +513,37 @@ def _stitch(
     merged, inverse, counts = np.unique(
         frequencies, return_inverse=True, return_counts=True
     )
-    stitched = np.zeros(len(merged), dtype=complex)
-    np.add.at(stitched, inverse, signal - offsets[batch])
+    stitched = np.zeros((*signal.shape[:-1], len(merged)), dtype=complex)
+    # transposed, to accumulate along the last axis
+    np.add.at(stitched.T, inverse, (signal - offsets[batch]).T)
     stitched /= counts
     return (
         merged,
         np.stack([stitched.real, stitched.imag], axis=-1),
         np.abs(steps).tolist(),
         (np.abs(steps) > step_threshold * errors).tolist(),
+    )
+
+
+def _stitch(
+    data: QubitSpectroscopyData, qubit: QubitId, step_threshold: float = 3
+) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64], list[float], list[bool]]:
+    """Align the batches of ``qubit`` to its anchor batch, and merge them.
+
+    See :func:`_stitch_batches`.
+    """
+    frequencies = np.array(data.drive_frequencies[qubit])
+    iq = np.asarray(data.data[qubit])
+    if qubit not in data.batch_indices:
+        return frequencies, iq, [], []
+
+    return _stitch_batches(
+        frequencies,
+        iq[..., 0] + 1j * iq[..., 1],
+        np.array(data.batch_indices[qubit]),
+        data.anchor_batch[qubit],
+        len(data.lo_frequencies[qubit]),
+        step_threshold,
     )
 
 

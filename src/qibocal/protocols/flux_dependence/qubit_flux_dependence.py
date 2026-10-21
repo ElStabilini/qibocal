@@ -1,18 +1,8 @@
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 import numpy as np
 import numpy.typing as npt
-from qibolab import (
-    AcquisitionType,
-    AveragingMode,
-    Delay,
-    Parameter,
-    Pulse,
-    PulseSequence,
-    Rectangular,
-    Sweeper,
-)
+from qibolab import Parameter, Sweeper
 from scipy.signal import find_peaks
 
 from qibocal.auto.operation import Data, Protocol, QubitId, Results
@@ -21,10 +11,7 @@ from qibocal.config import log
 from qibocal.result import magnitude
 
 from ... import update
-from ..qubit_spectroscopies.qubit_spectroscopy import (
-    _calculate_batches,
-    _drive_lo_updates,
-)
+from ..lo_sweeps import acquire, drive_sequence, plan_drive_sweeps, stitch
 from ..utils import (
     readout_frequency,
     table_dict,
@@ -100,6 +87,8 @@ class QubitFluxData(Data):
     wide_scan: bool = False
     """Whether the frequency window required LO batching. The fit is not designed for
     such wide scans, so it is skipped and the data are only displayed."""
+    lo_frequencies: dict[QubitId, list[float | None]] = field(default_factory=dict)
+    """Drive LO frequency [Hz] used in each batch."""
     data: dict[QubitId, npt.NDArray[QubitFluxType]] = field(default_factory=dict)
     """Raw data acquired."""
 
@@ -117,114 +106,63 @@ def _acquisition(
 ) -> QubitFluxData:
     """Data acquisition for QubitFlux Experiment.
 
-    As in qubit spectroscopy, if the frequency window exceeds the IF bandwidth, the
-    frequency axis is split into batches, and the drive LOs are retuned for the batches
-    which do not fit within the IF bandwidth from the current LO.
+    As in qubit spectroscopy, the frequency sweep of each qubit is split in batches,
+    each within the IF bandwidth of its drive LO, and the batches are stitched in IQ.
     """
 
-    sequence = PulseSequence()
-    ro_pulses = {}
-    qd_pulses = {}
     qubit_frequency = {}
-    drive_channels = {}
-    freq_ranges = {}
-    offset_sweepers = []
+    sequences = {}
+    frequencies = {}
+    offset_sweepers = {}
+    updates = {}
     for q in targets:
-        qd_channel = platform.qubits[q].drive
-        qd_pulse = Pulse(
-            amplitude=params.drive_amplitude,
-            duration=params.drive_duration,
-            envelope=Rectangular(),
+        qubit = platform.qubits[q]
+        qubit_frequency[q] = frequency0 = platform.config(qubit.drive).frequency
+        sequences[q] = drive_sequence(
+            platform, q, params.drive_amplitude, params.drive_duration
         )
-        natives = platform.natives.single_qubit[q]
-        ro_channel, ro_pulse = natives.MZ()[0]
-
-        qd_pulses[q] = qd_pulse
-        ro_pulses[q] = ro_pulse
-        qubit_frequency[q] = frequency0 = platform.config(qd_channel).frequency
-        drive_channels[q] = qd_channel
-        freq_ranges[q] = params.frequency_range(frequency0)
-
-        sequence.append((qd_channel, qd_pulse))
-        sequence.append((ro_channel, Delay(duration=qd_pulse.duration)))
-        sequence.append((ro_channel, ro_pulse))
-
-        flux_channel = platform.qubits[q].flux
-        offset0 = platform.config(flux_channel).offset
-        offset_sweepers.append(
-            Sweeper(
-                parameter=Parameter.offset,
-                range=params.bias_range(center=offset0),
-                channels=[flux_channel],
-            )
+        frequencies[q] = np.arange(*params.frequency_range(frequency0))
+        offset_sweepers[q] = Sweeper(
+            parameter=Parameter.offset,
+            range=params.bias_range(center=platform.config(qubit.flux).offset),
+            channels=[qubit.flux],
         )
+        updates[q] = {
+            qubit.probe: {"frequency": readout_frequency(q, platform)},
+            qubit.flux: {"offset": 0.0},
+        }
+
+    sweeps = plan_drive_sweeps(platform, frequencies)
+    results = acquire(
+        platform,
+        sequences,
+        sweeps,
+        nshots=params.nshots,
+        relaxation_time=params.relaxation_time,
+        outer=offset_sweepers,
+        updates=updates,
+    )
 
     data = QubitFluxData(
         resonator_type=platform.resonator_type,
         charging_energy={
-            qubit: platform.calibration.single_qubits[qubit].qubit.charging_energy
-            for qubit in targets
+            q: platform.calibration.single_qubits[q].qubit.charging_energy
+            for q in targets
         },
         qubit_frequency=qubit_frequency,
+        # only stitching batches makes the fit unreliable, a retuned LO alone does not
+        wide_scan=any(len(sweeps[q].batches) > 1 for q in targets),
+        lo_frequencies={q: sweeps[q].lo_frequencies for q in targets},
     )
-
-    start, stop, step = freq_ranges[targets[0]]
-    width = stop - start
-    relative = np.arange(0, width, step) - width / 2
-    # centre of the frequency window of each qubit
-    f0 = {q: (freq_ranges[q][0] + freq_ranges[q][1]) / 2 for q in targets}
-
-    batches = _calculate_batches(freq_width=width)
-    # only stitching batches makes the fit unreliable, a retuned LO alone does not
-    data.wide_scan = len(batches) > 1
-
-    raw_results = defaultdict(list)
-    for i, (batch_start, batch_end, _) in enumerate(batches):
-        # open-ended outer edges, so that no point is lost to rounding
-        lower = batch_start if i > 0 else -np.inf
-        upper = batch_end if i < len(batches) - 1 else np.inf
-        selected = (relative >= lower) & (relative < upper)
-        if not selected.any():
-            continue
-
-        batch_frequencies = {q: f0[q] + relative[selected] for q in targets}
-        batch_updates = [
-            {
-                platform.qubits[q].probe: {"frequency": readout_frequency(q, platform)},
-                platform.qubits[q].flux: {"offset": 0.0},
-            }
-            for q in targets
-        ]
-        batch_updates.append(_drive_lo_updates(platform, batch_frequencies))
-
-        freq_sweepers = [
-            Sweeper(
-                parameter=Parameter.frequency,
-                values=batch_frequencies[q],
-                channels=[drive_channels[q]],
-            )
-            for q in targets
-        ]
-        results = platform.execute(
-            [sequence],
-            [offset_sweepers, freq_sweepers],
-            updates=batch_updates,
-            nshots=params.nshots,
-            relaxation_time=params.relaxation_time,
-            acquisition_type=AcquisitionType.INTEGRATION,
-            averaging_mode=AveragingMode.CYCLIC,
+    for q in targets:
+        freq, iq, *_ = stitch(
+            results[q].frequencies, results[q].iq, results[q].batch, sweeps[q].anchor
         )
-        for q in targets:
-            raw_results[q].append(results[ro_pulses[q].id])
-
-    # stitch the batches along the frequency axis
-    for i, qubit in enumerate(targets):
-        result = np.concatenate(raw_results[qubit], axis=1)
         data.register_qubit(
-            qubit,
-            signal=magnitude(result),
-            freq=f0[qubit] + relative,
-            bias=offset_sweepers[i].values,
+            q,
+            signal=magnitude(iq),
+            freq=freq,
+            bias=offset_sweepers[q].values,
         )
     return data
 
@@ -443,6 +381,11 @@ def _plot(data: QubitFluxData, fit: QubitFluxResults, target: QubitId):
     if data.wide_scan:
         return figures, table_html(
             table_dict(target, ["Fit"], ["skipped (wide scan, acquired in batches)"])
+        ) + table_html(
+            {
+                "Batch": list(range(len(data.lo_frequencies[target]))),
+                "LO Frequency [Hz]": data.lo_frequencies[target],
+            }
         )
     return figures, ""
 

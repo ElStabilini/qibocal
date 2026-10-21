@@ -20,7 +20,7 @@ from ... import update
 from ...auto.operation import Data, Protocol, QubitId, Results
 from ...config import log
 from ...result import magnitude
-from ..qubit_spectroscopies.qubit_spectroscopy import _calculate_batches
+from ..lo_sweeps import MAX_IF_BANDWIDTH
 from ..utils import (
     readout_frequency,
     table_dict,
@@ -32,6 +32,20 @@ __all__ = ["ResonatorFluxParameters", "resonator_flux"]
 
 # approximate width of a peak in the resonator spectroscopy in Hz
 APPROXIMATE_RESONATOR_PEAK_WIDTH = 0.25e6
+
+
+def _calculate_batches(
+    freq_width: float, max_if_bandwidth: float = MAX_IF_BANDWIDTH
+) -> npt.NDArray[np.float64]:
+    """Split a window of ``freq_width``, centred at zero, in batches.
+
+    Each row holds the start, the end, and the LO offset of a batch.
+    """
+    batch_starts = np.arange(-freq_width / 2, freq_width / 2, 2 * max_if_bandwidth)
+    batch_ends = np.append(batch_starts[1:], freq_width / 2)
+    batch_limits = np.stack((batch_starts, batch_ends))
+    lo_offsets = batch_limits.sum(axis=0) / 2 if len(batch_starts) > 1 else [0]
+    return np.vstack((batch_limits, lo_offsets)).T
 
 
 @dataclass
@@ -188,9 +202,11 @@ def _acquisition(
         default=0.0,
     )
 
-    batches = _calculate_batches(width, max_if_bandwidth=300e6)
+    batches = _calculate_batches(width)
     if len(batches) > 1:
-        batches = _calculate_batches(width, max_if_bandwidth=300e6 - max_if_shift)
+        batches = _calculate_batches(
+            width, max_if_bandwidth=MAX_IF_BANDWIDTH - max_if_shift
+        )
         data.wide_scan = True
 
     raw_results = defaultdict(list)

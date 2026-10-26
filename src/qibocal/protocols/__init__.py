@@ -26,6 +26,9 @@ from . import (
     flipping as flipping_,
 )
 from . import (
+    orbit as orbit_,
+)
+from . import (
     ramsey as ramsey_,
 )
 from .allxy import *
@@ -35,6 +38,7 @@ from .dispersive_shift import *
 from .drag import *
 from .flipping import *
 from .flux_dependence import *
+from .orbit import *
 from .qubit_spectroscopies import *
 from .rabi import *
 from .ramsey import *
@@ -60,6 +64,7 @@ __all__ += dispersive_shift_.__all__
 __all__ += classification.__all__
 __all__ += drag.__all__
 __all__ += flipping_.__all__
+__all__ += orbit_.__all__
 __all__ += readout.__all__
 __all__ += tomographies.__all__
 __all__ += resonator_spectroscopies.__all__

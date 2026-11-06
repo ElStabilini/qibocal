@@ -11,6 +11,7 @@ from qibolab import (
     PulseSequence,
     Readout,
 )
+from qibolab._core.native import rotation
 from scipy.optimize import curve_fit
 
 from qibocal import update
@@ -34,6 +35,14 @@ __all__ = ["drag_simple"]
 class DragTuningSimpleParameters(DragTuningParameters):
     """DragTuningSimple runcard inputs."""
 
+    rx90: bool = False
+    """If true the beta of the RX90 native pulse is calibrated, otherwise the one of RX."""
+
+    def __post_init__(self):
+        super().__post_init__()
+        if not isinstance(self.rx90, bool):
+            raise TypeError(f"rx90 must be boolean, got {type(self.rx90).__name__}")
+
 
 @dataclass
 class DragTuningSimpleResults(Results):
@@ -43,6 +52,8 @@ class DragTuningSimpleResults(Results):
     """Optimal beta paramter for each qubit."""
     fitted_parameters: dict[tuple[QubitId, str], list[float]]
     """Raw fitting output: mapping qubit to setup to fit parameters [a, b] for ax+b."""
+    rx90: bool = False
+    """Whether the beta of RX90 (True) or RX (False) has been calibrated."""
 
     def __contains__(self, key):
         return key in self.betas
@@ -51,6 +62,9 @@ class DragTuningSimpleResults(Results):
 @dataclass
 class DragTuningSimpleData(DragTuningData):
     """DragTuningSimple acquisition outputs."""
+
+    rx90: bool = False
+    """Whether the beta of RX90 (True) or RX (False) is being calibrated."""
 
     def __getitem__(self, key: tuple[QubitId, str]):
         # TODO: the input type breaks Liskov so probably the base class AbstractData
@@ -70,6 +84,17 @@ def add_drag(pulse: Pulse, beta: float) -> Pulse:
     )
 
 
+def _rotation(natives, theta: float, phi: float, rx90: bool) -> PulseSequence:
+    """Rotation built only from the native pulse whose beta is calibrated.
+
+    ``natives.R`` would pick RX90 whenever available, which is not what we want when
+    calibrating RX.
+    """
+    if rx90:
+        return rotation(natives.RX90(), theta, phi, rx90=True)
+    return rotation(natives.RX(), theta, phi)
+
+
 def _acquisition(
     params: DragTuningSimpleParameters,
     platform: CalibrationPlatform,
@@ -82,7 +107,7 @@ def _acquisition(
     for different value of the DRAG parameter.
     """
 
-    data = DragTuningSimpleData()
+    data = DragTuningSimpleData(rx90=params.rx90)
     beta_param_range = np.arange(*params.beta_range).tolist()
 
     sequences, all_ro_pulses = [], []
@@ -95,8 +120,8 @@ def _acquisition(
                 ro_channel, ro_pulse = natives.MZ()[0]
                 qd_channel = platform.qubits[q].drive
                 if setup == "YpX9":
-                    ry_sequence = natives.R(phi=np.pi / 2)
-                    rx90_sequence = natives.R(theta=np.pi / 2)
+                    ry_sequence = _rotation(natives, np.pi, np.pi / 2, params.rx90)
+                    rx90_sequence = _rotation(natives, np.pi / 2, 0.0, params.rx90)
                     for channel, pulse in ry_sequence:
                         assert isinstance(pulse, Pulse)
                         sequence.append((qd_channel, add_drag(pulse, beta=beta)))
@@ -112,18 +137,22 @@ def _acquisition(
                         )
                     )
                 else:
-                    _, rx = natives.RX()[0]
-                    assert isinstance(rx, Pulse)
-                    ry90_sequence = natives.R(theta=np.pi / 2, phi=np.pi / 2)
-                    sequence.append((qd_channel, add_drag(rx, beta=beta)))
+                    rx_sequence = _rotation(natives, np.pi, 0.0, params.rx90)
+                    ry90_sequence = _rotation(
+                        natives, np.pi / 2, np.pi / 2, params.rx90
+                    )
+                    for channel, pulse in rx_sequence:
+                        assert isinstance(pulse, Pulse)
+                        sequence.append((qd_channel, add_drag(pulse, beta=beta)))
                     for channel, pulse in ry90_sequence:
                         assert isinstance(pulse, Pulse)
                         sequence.append((qd_channel, add_drag(pulse, beta=beta)))
-                    assert isinstance(rx, Pulse)
                     sequence.append(
                         (
                             ro_channel,
-                            Delay(duration=rx.duration + ry90_sequence.duration),
+                            Delay(
+                                duration=rx_sequence.duration + ry90_sequence.duration
+                            ),
                         )
                     )
                 sequence.append((ro_channel, ro_pulse))
@@ -196,7 +225,7 @@ def _fit(data: DragTuningSimpleData) -> DragTuningSimpleResults:
             )
         except ZeroDivisionError:
             pass
-    return DragTuningSimpleResults(betas_optimal, fitted_parameters)
+    return DragTuningSimpleResults(betas_optimal, fitted_parameters, data.rx90)
 
 
 def _plot(
@@ -278,6 +307,7 @@ def _update(
         results.betas[target],
         platform,
         target,
+        rx90=results.rx90,
     )
 
 

@@ -558,6 +558,15 @@ actions:
       beta_step: 0.01
       nshots: 10
 
+  - id: drag_pulse_simple
+    operation: drag_simple
+    parameters:
+      beta_start: 0
+      beta_end: 0.1
+      beta_step: 0.01
+      nshots: 10
+      rx90: True
+
   - id: spin_echo
     operation: spin_echo
     parameters:
@@ -613,17 +622,6 @@ actions:
       freq_width: 10_000_000
       freq_step: 100_000
       nshots: 10
-
-  - id: standard rb percentile
-    operation: standard_rb
-    parameters:
-      depths:
-        start: 1
-        stop: 10
-        step: 2
-      niter: 2
-      uncertainties: 95
-      nshots: 50
 
   - id: standard rb no error
     operation: standard_rb

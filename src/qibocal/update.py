@@ -169,6 +169,14 @@ def virtual_phases(
     platform.update({f"native_gates.two_qubit.{_dump_pair(pair)}.{native}": new_native})
 
 
+def cz_flux_path(platform: Platform, pair: QubitPairId) -> str:
+    """Parameters path of the CZ flux pulse of ``pair``, in whichever order the
+    platform stores the pair."""
+    if pair not in platform.natives.two_qubit:
+        pair = (pair[1], pair[0])
+    return f"native_gates.two_qubit.{_dump_pair(pair)}.CZ.0.1"
+
+
 def CZ_duration(duration: float, platform: Platform, pair: QubitPairId):
     """Update CZ duration for specific pair."""
     platform.update(
@@ -217,12 +225,15 @@ def t2_spin_echo(t2_spin_echo: float, platform: Platform, qubit: QubitId):
     platform.calibration.single_qubits[qubit].t2_spin_echo = tuple(t2_spin_echo)
 
 
-def drag_pulse_beta(beta: float, platform: Platform, qubit: QubitId):
+def drag_pulse_beta(
+    beta: float, platform: Platform, qubit: QubitId, rx90: bool = False
+):
     """Update beta parameter value in platform for specific qubit."""
+    gate = "RX90" if rx90 else "RX"
     platform.update(
         {
-            f"native_gates.single_qubit.{qubit}.RX.0.1.envelope.kind": "drag",
-            f"native_gates.single_qubit.{qubit}.RX.0.1.envelope.beta": beta,
+            f"native_gates.single_qubit.{qubit}.{gate}.0.1.envelope.kind": "drag",
+            f"native_gates.single_qubit.{qubit}.{gate}.0.1.envelope.beta": beta,
         }
     )
 

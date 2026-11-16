@@ -2,6 +2,7 @@ from .filtered_rb import filtered_rb
 from .standard_rb import standard_rb
 from .standard_rb_2q import standard_rb_2q
 from .standard_rb_2q_inter import standard_rb_2q_inter
+from .standard_rb_inter import standard_rb_inter
 from .standard_rb_sweeper import standard_rb_sweeper
 
 __all__ = [
@@ -9,5 +10,6 @@ __all__ = [
     "standard_rb",
     "standard_rb_2q",
     "standard_rb_2q_inter",
+    "standard_rb_inter",
     "standard_rb_sweeper",
 ]

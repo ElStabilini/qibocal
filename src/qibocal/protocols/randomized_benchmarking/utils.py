@@ -97,6 +97,20 @@ SINGLE_QUBIT_CLIFFORDS = {
     ),  # Rx(-pi/2)Ry(pi/2)Rx(-pi/2)
 }
 
+INTERLEAVED_1Q_GATES = {
+    "I": SINGLE_QUBIT_CLIFFORDS[0],
+    "Z": SINGLE_QUBIT_CLIFFORDS[1],
+    "X": SINGLE_QUBIT_CLIFFORDS[4],
+    "Y": SINGLE_QUBIT_CLIFFORDS[5],
+    "SX": SINGLE_QUBIT_CLIFFORDS[6],  # Rx(pi/2)
+    "SXdg": SINGLE_QUBIT_CLIFFORDS[7],  # Rx(-pi/2)
+    "SY": SINGLE_QUBIT_CLIFFORDS[8],  # Ry(pi/2)
+    "SYdg": SINGLE_QUBIT_CLIFFORDS[9],  # Ry(-pi/2)
+    "H": SINGLE_QUBIT_CLIFFORDS[19],
+}
+"""Single qubit Clifford gates that can be interleaved in single qubit interleaved RB,
+expressed with the same U3 decomposition used for the random Cliffords."""
+
 NPULSES_PER_CLIFFORD = 1.875
 
 """
@@ -246,6 +260,16 @@ class RBData(Data):
 
 
 @dataclass
+class RBInterData(RBData):
+    """The output of the single qubit interleaved RB acquisition function."""
+
+    fidelity: dict[QubitId, list] = field(default_factory=dict)
+    """Reference (standard RB) Clifford fidelity of each qubit."""
+    interleave: str | None = None
+    """Name of the interleaved gate."""
+
+
+@dataclass
 class RB2QData(RBData):
     """The output of the acquisition function."""
 
@@ -309,7 +333,7 @@ def setup_data(
     """
     # Set up the scan (here an iterator of circuits of random clifford gates with an inverse).
     if single_qubit:
-        cls = RBData
+        cls = RBInterData if interleave is not None else RBData
     elif interleave is not None:
         cls = RB2QInterData
     else:
@@ -445,7 +469,10 @@ def rb_acquisition(
 
     npulses_per_clifford = rb_gen.calculate_average_pulses()
     data = setup_data(
-        params, npulses_per_clifford=npulses_per_clifford, single_qubit=True
+        params,
+        npulses_per_clifford=npulses_per_clifford,
+        single_qubit=True,
+        interleave=interleave,
     )
 
     indexed_circuits = _generate_indexed_circuits(
@@ -591,6 +618,8 @@ def layer_circuit(
         new_circuit = Circuit(nqubits)
         if nqubits == 1:
             new_circuit.add(new_layer)
+            if interleave is not None:
+                new_circuit.add(INTERLEAVED_1Q_GATES[interleave](0))
         elif nqubits == 2:
             for gate in new_layer:
                 new_circuit.add(gate)

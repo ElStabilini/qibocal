@@ -64,6 +64,20 @@ SINGLE_QUBIT_CLIFFORDS = {
     ),  # Rx(-pi/2)Ry(pi/2)Rx(-pi/2)
 }
 
+INTERLEAVED_1Q_GATES = {
+    "I": 0,
+    "Z": 1,
+    "X": 4,
+    "Y": 5,
+    "SX": 6,
+    "SXdg": 7,
+    "SY": 8,
+    "SYdg": 9,
+    "H": 19,
+}
+"""Single qubit Clifford gates that can be interleaved, mapped to their index in
+:data:`SINGLE_QUBIT_CLIFFORDS`."""
+
 NPULSES_PER_CLIFFORD = 1.875
 
 """
@@ -285,6 +299,16 @@ class RBData(Data):
 
 
 @dataclass
+class RBInterData(RBData):
+    """The output of the single qubit interleaved RB acquisition function."""
+
+    fidelity: dict[QubitId, list] = field(default_factory=dict)
+    """Reference (standard RB) fidelity of each qubit."""
+    interleave: Optional[str] = None
+    """Name of the interleaved gate."""
+
+
+@dataclass
 class RB2QData(RBData):
     """The output of the acquisition function."""
 
@@ -347,7 +371,7 @@ def setup(
     backend = construct_backend(backend="qibolab", platform=platform)
     # Set up the scan (here an iterator of circuits of random clifford gates with an inverse).
     if single_qubit:
-        cls = RBData
+        cls = RBData if interleave is None else RBInterData
     elif interleave is not None:
         cls = RB2QInterData
     else:
@@ -479,7 +503,7 @@ def rb_acquisition(
     Returns:
         RBData: The depths, samples, and ground state probability of each experiment in the scan.
     """
-    data, backend = setup(params, platform, single_qubit=True)
+    data, backend = setup(params, platform, single_qubit=True, interleave=interleave)
     circuits, indexes, npulses_per_clifford = get_circuits(
         params, targets, add_inverse_layer, interleave, single_qubit=True
     )
@@ -591,6 +615,10 @@ def layer_circuit(
         new_circuit = Circuit(nqubits)
         if nqubits == 1:
             new_circuit.add(new_layer)
+            if interleave is not None:
+                interleaved_index = INTERLEAVED_1Q_GATES[interleave]
+                new_circuit.add(SINGLE_QUBIT_CLIFFORDS[interleaved_index](0))
+                random_indexes.append(interleaved_index)
         elif nqubits == 2:
             for gate in new_layer:
                 new_circuit.add(gate)

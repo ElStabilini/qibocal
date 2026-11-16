@@ -6,6 +6,8 @@ import pytest
 from qibocal.protocols.randomized_benchmarking import fitting
 from qibocal.protocols.randomized_benchmarking.dict_utils import load_inverse_cliffords
 from qibocal.protocols.randomized_benchmarking.utils import (
+    INTERLEAVED_1Q_GATES,
+    SINGLE_QUBIT_CLIFFORDS,
     RB_Generator,
     generate_inv_dict_cliffords_file,
     layer_circuit,
@@ -176,6 +178,21 @@ def test_layer_circuit_single_qubit(mocker, depth):
     for gate, i in single_qubit_spy.spy_return_list:
         assert gate in circuit_gates
         assert i in indices
+
+
+@pytest.mark.parametrize("interleave", list(INTERLEAVED_1Q_GATES))
+@pytest.mark.parametrize("depth", [1, 10])
+def test_layer_circuit_single_qubit_interleaved(depth, interleave):
+    rb_gen = RB_Generator(123)
+    circuit, indices = layer_circuit(rb_gen, depth, 0, interleave)
+    interleaved_index = INTERLEAVED_1Q_GATES[interleave]
+
+    # one random Clifford followed by the interleaved gate for each layer
+    assert len(circuit.queue) == 2 * depth
+    assert indices[1::2] == [interleaved_index] * depth
+    interleaved = SINGLE_QUBIT_CLIFFORDS[interleaved_index](0).matrix()
+    for gate in circuit.queue[1::2]:
+        assert np.allclose(gate.matrix(), interleaved)
 
 
 @pytest.mark.parametrize("depth", [2, 24, 47])

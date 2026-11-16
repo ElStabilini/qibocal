@@ -764,6 +764,15 @@ actions:
       niter: 5
       nshots: 50
 
+  - id: standard rb interleaved
+    operation: standard_rb_inter
+    targets: [1]
+    parameters:
+      depths: [1, 2, 3, 5]
+      niter: 5
+      nshots: 50
+      interleave: SX
+
   - id: standard rb 2q
     operation: standard_rb_2q
     targets: [[0,1]]

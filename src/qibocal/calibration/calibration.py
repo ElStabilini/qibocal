@@ -139,6 +139,8 @@ class QubitCalibration(Model):
     """T2 hanh echo [ns]."""
     rb_fidelity: Optional[Measure] = None
     """Standard rb pulse fidelity."""
+    gate_fidelity: dict[str, Measure] = Field(default_factory=dict)
+    """Single qubit gate fidelities from interleaved rb, indexed by gate name."""
 
 
 class TwoQubitCalibration(Model):

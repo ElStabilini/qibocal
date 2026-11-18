@@ -54,6 +54,13 @@ class ResonatorFluxParameters(utils.FluxFrequencySweepParameters):
 
     bias_center: float | None = None
     freq_center: float | None = None
+    amplitude: float = field(kw_only=True)
+    """Readout probe amplitude, the same for all qubits."""
+    duration: float = update.DEFAULT_READOUT_DURATION
+    """Readout probe duration [ns], the same for all qubits.
+
+    The probe is rectangular, and it is acquired for its whole duration.
+    """
 
 
 @dataclass
@@ -124,9 +131,10 @@ def _acquisition(
     targets: list[QubitId],
 ) -> ResonatorFluxData:
     """Data acquisition for ResonatorFlux experiment.
-    If the frequency window is wider than the IF bandwidth, the frequency axis is split into batches, as in qubit spectroscopy.
-    """
 
+    The resonators are probed with rectangular readouts, independent of the calibrated
+    measurements.
+    """
     # taking advantage of multiplexing, apply the same set of gates to all qubits in parallel
     sequence = PulseSequence()
     ro_pulses = {}
@@ -139,9 +147,9 @@ def _acquisition(
     probes = {}
     offset_sweepers = []
     for q in targets:
-        ro_sequence = platform.natives.single_qubit[q].MZ()
-        ro_pulses[q] = ro_sequence[0][1]
-        sequence += ro_sequence
+        ro_channel = platform.qubits[q].acquisition
+        ro_pulses[q] = update.rectangular_readout(params.amplitude, params.duration)
+        sequence.append((ro_channel, ro_pulses[q]))
 
         qubit = platform.qubits[q]
         offset0 = platform.config(qubit.flux).offset
@@ -223,12 +231,12 @@ def _acquisition(
             for q in targets:
                 # channel frequency only to pass qibolab's IF validation, as in qubit
                 # spectroscopy; a shared LO just receives the same value several times
-                update = {probes[q]: {"frequency": probe_center[q] + lo_offset}}
+                probe_update = {probes[q]: {"frequency": probe_center[q] + lo_offset}}
                 if probe_los[q] is not None:
-                    update[probe_los[q]] = {
+                    probe_update[probe_los[q]] = {
                         "frequency": lo_center[probe_los[q]] + lo_offset
                     }
-                updates.append(update)
+                updates.append(probe_update)
 
         freq_sweepers = [
             Sweeper(

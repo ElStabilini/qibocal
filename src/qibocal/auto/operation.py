@@ -33,6 +33,7 @@ RESULTSFILE = "results"
 DEFAULT_PARENT_PARAMETERS = {
     "nshots": None,
     "relaxation_time": None,
+    "flux_away": False,
 }
 """Default values of the parameters of `Parameters`"""
 
@@ -52,6 +53,10 @@ class Parameters:
     """Number of executions on hardware."""
     relaxation_time: float
     """Wait time for the qubit to decohere back to the ground state."""
+    flux_away: bool = False
+    """Move the non-target qubits to their ``inactive_point`` during acquisition.
+    The inactive point is the flux offset stored for each qubit in the platform ``parameters.json``.
+    """
 
     @classmethod
     def load(cls, input_parameters):

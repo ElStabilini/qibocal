@@ -602,3 +602,72 @@ def test_check_input_qubit_overlap():
     inputs = [(0, 1), (2, 2)]
     with pytest.raises(ValueError, match="One or more target qubits were repeated."):
         check_overlap_in_input_qubits(inputs)
+
+
+requires_flux_away = pytest.mark.skipif(
+    not hasattr(Platform, "flux_away"),
+    reason="installed qibolab does not support flux_away",
+)
+
+
+def _offsets_protocol(seen):
+    def acquire(parameters, platform, targets):
+        seen.update(
+            {
+                q: platform.config(platform.qubits[q].flux).offset
+                for q in platform.qubits
+            }
+        )
+        if parameters.fail:
+            raise RuntimeError("acquisition failed")
+
+    return Protocol(acquisition=acquire)
+
+
+@requires_flux_away
+@pytest.mark.parametrize("flux_away", [True, False])
+def test_flux_away(platform, flux_away):
+    flux = {q: qubit.flux for q, qubit in platform.qubits.items()}
+    original = {q: platform.config(ch).offset for q, ch in flux.items()}
+    for q, ch in flux.items():
+        platform.update({f"configs.{ch}.inactive_point": 5.0 + q})
+
+    seen = {}
+    pars = type("P", (), {})()
+    pars.flux_away, pars.fail = flux_away, False
+    Executor(platform, targets=[0]).acquire(_offsets_protocol(seen)(pars=pars))
+
+    for q in flux:
+        expected = 5.0 + q if flux_away and q != 0 else original[q]
+        assert seen[q] == expected
+    # offsets are restored afterwards
+    assert {q: platform.config(ch).offset for q, ch in flux.items()} == original
+
+
+@requires_flux_away
+def test_flux_away_restores_on_error_and_pairs(platform):
+    flux = {q: qubit.flux for q, qubit in platform.qubits.items()}
+    original = {q: platform.config(ch).offset for q, ch in flux.items()}
+    for ch in flux.values():
+        platform.update({f"configs.{ch}.inactive_point": 5.0})
+
+    seen = {}
+    pars = type("P", (), {})()
+    pars.flux_away, pars.fail = True, True
+    executor = Executor(platform, targets=[(0, 1)])
+    with pytest.raises(RuntimeError):
+        executor.acquire(_offsets_protocol(seen)(pars=pars))
+    # both members of the pair are untouched, the others are moved
+    assert seen[0] == original[0] and seen[1] == original[1]
+    assert all(seen[q] == 5.0 for q in flux if q not in (0, 1))
+    assert {q: platform.config(ch).offset for q, ch in flux.items()} == original
+
+
+@requires_flux_away
+def test_flux_away_missing_inactive_point(platform):
+    for q in platform.qubits:
+        platform.update({f"configs.{platform.qubits[q].flux}.inactive_point": None})
+    pars = type("P", (), {})()
+    pars.flux_away, pars.fail = True, False
+    with pytest.raises(ValueError, match="inactive point"):
+        Executor(platform, targets=[0]).acquire(_offsets_protocol({})(pars=pars))

@@ -29,7 +29,7 @@ from .operation import (
     Parameters,
 )
 from .output import Metadata, Output
-from .task import Action, Completed, Targets, Task
+from .task import Action, Completed, QubitId, Targets, Task
 
 
 def check_overlap_in_input_qubits(targets: np.typing.ArrayLike):
@@ -38,6 +38,20 @@ def check_overlap_in_input_qubits(targets: np.typing.ArrayLike):
     targ = np.asarray(targets)
     if np.unique(targ).size != targ.size:
         raise ValueError("One or more target qubits were repeated.")
+
+
+def _non_targets(platform: Platform, targets: Targets) -> list[QubitId]:
+    """Qubits of the platform that are not among the targets.
+
+    Targets may be qubits or tuples of qubits (e.g. pairs).
+    """
+    flat = set()
+    for target in targets:
+        if isinstance(target, list | tuple):
+            flat.update(target)
+        else:
+            flat.add(target)
+    return [qubit for qubit in platform.qubits if qubit not in flat]
 
 
 def _resolve(protocol: BoundProtocol, kwargs: dict) -> BoundProtocol:
@@ -405,7 +419,8 @@ class Executor:
             defaults = {
                 name: getattr(context["platform"].settings, name)
                 for name in DEFAULT_PARENT_PARAMETERS
-                if getattr(parameters, name, None) is None
+                if hasattr(context["platform"].settings, name)
+                and getattr(parameters, name, None) is None
             }
             if defaults:
                 parameters = copy(parameters)
@@ -413,7 +428,16 @@ class Executor:
                     setattr(parameters, name, value)
                 bound = replace(bound, parameters=parameters)
         start = time.perf_counter()
-        data = _invoke(bound.protocol.acquisition, parameters, **context)
+        platform = context["platform"]
+        moved = {}
+        if getattr(parameters, "flux_away", False) and isinstance(platform, Platform):
+            moved = platform.flux_away(_non_targets(platform, context["targets"]))
+        try:
+            data = _invoke(bound.protocol.acquisition, parameters, **context)
+        finally:
+            # restore the original offsets, so that they never leak in updates
+            if moved:
+                platform.restore_flux(moved)
         return Completed(
             bound=bound,
             _data=data,

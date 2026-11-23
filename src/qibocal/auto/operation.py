@@ -34,6 +34,7 @@ DEFAULT_PARENT_PARAMETERS = {
     "nshots": None,
     "relaxation_time": None,
     "flux_away": False,
+    "inactive_points": None,
 }
 """Default values of the parameters of `Parameters`"""
 
@@ -56,6 +57,10 @@ class Parameters:
     flux_away: bool = False
     """Move the non-target qubits to their ``inactive_point`` during acquisition.
     The inactive point is the flux offset stored for each qubit in the platform ``parameters.json``.
+    """
+    inactive_points: dict[QubitId, float] | None = None
+    """Inactive points to store in the platform, as ``{qubit: offset}``.
+    Saved with the platform, so later runcards only need ``flux_away``.
     """
 
     @classmethod

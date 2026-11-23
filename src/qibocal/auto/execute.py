@@ -54,6 +54,29 @@ def _non_targets(platform: Platform, targets: Targets) -> list[QubitId]:
     return [qubit for qubit in platform.qubits if qubit not in flat]
 
 
+def _set_inactive_points(
+    platform: Platform, inactive_points: Mapping[QubitId, float] | None
+):
+    """Store the given inactive points in the flux configs of the platform."""
+    if not inactive_points:
+        return
+    invalid = [
+        q
+        for q in inactive_points
+        if q not in platform.qubits or platform.qubits[q].flux is None
+    ]
+    if invalid:
+        raise ValueError(
+            f"Inactive points given for unknown qubits or without flux: {invalid}"
+        )
+    platform.update(
+        {
+            f"configs.{platform.qubits[q].flux}.inactive_point": value
+            for q, value in inactive_points.items()
+        }
+    )
+
+
 def _resolve(protocol: BoundProtocol, kwargs: dict) -> BoundProtocol:
     """Apply execution parameter overrides without mutating a bound protocol."""
     if not isinstance(protocol, BoundProtocol):
@@ -430,8 +453,10 @@ class Executor:
         start = time.perf_counter()
         platform = context["platform"]
         moved = {}
-        if getattr(parameters, "flux_away", False) and isinstance(platform, Platform):
-            moved = platform.flux_away(_non_targets(platform, context["targets"]))
+        if isinstance(platform, Platform):
+            _set_inactive_points(platform, getattr(parameters, "inactive_points", None))
+            if getattr(parameters, "flux_away", False):
+                moved = platform.flux_away(_non_targets(platform, context["targets"]))
         try:
             data = _invoke(bound.protocol.acquisition, parameters, **context)
         finally:
